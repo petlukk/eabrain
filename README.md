@@ -195,6 +195,53 @@ Projects: 6
 Session notes: 3
 ```
 
+### `eabrain patterns`
+
+Browse autoresearch-proven optimization patterns. This connects to the [autoresearch](https://github.com/petlukk/eacompute) benchmark suite (28 kernel benchmarks with automated optimization loops).
+
+```bash
+# List all benchmarks with iteration counts and best times
+eabrain patterns
+
+# Summary of every winning optimization across all 28 benchmarks
+eabrain patterns --what-works
+
+# Deep dive into a specific kernel: strategy space, what worked,
+# what failed, and the full source of the best kernel found
+eabrain patterns matmul
+eabrain patterns dot_product
+eabrain patterns conv2d_3x3
+```
+
+Example `eabrain patterns matmul` output:
+
+```
+# eabrain patterns: matmul
+
+## Strategy Space
+Matrix multiply is compute-bound with O(n^3) ops on O(n^2) data.
+Loop order affects cache behavior dramatically...
+
+## History (5 iterations, 1 accepted)
+   1. [rejected]    n/a WRONG   Restructure loop order from ikj to ijk...
+   5. [ACCEPTED]  330us correct  Remove excessive prefetch calls...
+
+## What Worked
+  - Remove excessive prefetch calls + unroll k-loop to 8
+
+## What Failed
+  - [compile error] Restructure loop order from ikj to ijk...
+
+## Best Kernel (95 lines)
+export func matmul_f32(a: *f32, b: *f32, c: *mut f32, n: i32) {
+    ...
+}
+```
+
+This gives your AI everything it needs to write an optimized kernel: the strategy space, proven patterns, known dead ends, and a working reference implementation.
+
+**Configuration:** By default looks for autoresearch at `/root/dev/eacompute/autoresearch/kernels`. Override with `autoresearch_dir` in `~/.eabrain/config.json`.
+
 ### `eabrain init`
 
 Generate a CLAUDE.md snippet (or append to an existing one) that tells your AI assistant how to use eabrain.
@@ -268,8 +315,10 @@ If you're Claude Code (or another AI) reading this, here's how to use eabrain:
 2. **Looking for a kernel:** Run `eabrain search "name"` before grepping manually
 3. **Ea syntax question:** Run `eabrain ref "intrinsic_name"` instead of guessing
 4. **Cross-compile question:** Run `eabrain ref "target-triple"`
-5. **End of session:** Run `eabrain remember "what we worked on"` to save context
-6. **After editing .ea files:** Run `eabrain index` to refresh the index
+5. **Writing a new kernel:** Run `eabrain patterns "kernel_type"` to see proven optimization patterns
+6. **Optimization guidance:** Run `eabrain patterns --what-works` for all winning strategies
+7. **End of session:** Run `eabrain remember "what we worked on"` to save context
+8. **After editing .ea files:** Run `eabrain index` to refresh the index
 
 ---
 
@@ -331,7 +380,7 @@ pip install -e ".[dev]" # install with dev deps (pytest)
 python3 -m pytest tests/ -v
 ```
 
-25 tests covering: kernel compilation and correctness, binary format roundtrips, index building against real project data, CLI integration.
+30 tests covering: kernel compilation and correctness, binary format roundtrips, index building against real project data, CLI integration.
 
 ### Project structure
 
