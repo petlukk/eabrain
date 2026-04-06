@@ -1,0 +1,359 @@
+// scan.ea — SIMD source code scanner for .ea files.
+// Finds "export func" declarations and detects SIMD type/intrinsic usage.
+// Uses u8x16 SIMD compare for fast scanning, scalar for position extraction.
+
+// ========== count_exports ==========
+// Count occurrences of "export func " in source buffer.
+// Uses u8x16 to scan for 'e' bytes, then verifies full pattern.
+
+export func count_exports(
+    src: *u8,
+    src_len: i32,
+    out_count: *mut i32
+) {
+    let e_splat: u8x16 = splat(101)
+    let ones: u8x16 = splat(1)
+    let zeros: u8x16 = splat(0)
+    let mut count: i32 = 0
+    let mut i: i32 = 0
+
+    while i + 16 <= src_len {
+        let chunk: u8x16 = load(src, i)
+        let cmp: u8x16 = select(chunk .== e_splat, ones, zeros)
+        let hits: i32 = to_i32(reduce_add(cmp))
+        if hits > 0 {
+            // Check each position in this window for "export func "
+            let mut j: i32 = 0
+            while j < 16 {
+                let pos: i32 = i + j
+                if pos + 12 <= src_len {
+                    if to_i32(src[pos]) == 101 {
+                        if to_i32(src[pos + 1]) == 120 {
+                            if to_i32(src[pos + 2]) == 112 {
+                                if to_i32(src[pos + 3]) == 111 {
+                                    if to_i32(src[pos + 4]) == 114 {
+                                        if to_i32(src[pos + 5]) == 116 {
+                                            if to_i32(src[pos + 6]) == 32 {
+                                                if to_i32(src[pos + 7]) == 102 {
+                                                    if to_i32(src[pos + 8]) == 117 {
+                                                        if to_i32(src[pos + 9]) == 110 {
+                                                            if to_i32(src[pos + 10]) == 99 {
+                                                                if to_i32(src[pos + 11]) == 32 {
+                                                                    count = count + 1
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 16
+    }
+    // Scalar tail
+    while i + 12 <= src_len {
+        if to_i32(src[i]) == 101 {
+            if to_i32(src[i + 1]) == 120 {
+                if to_i32(src[i + 2]) == 112 {
+                    if to_i32(src[i + 3]) == 111 {
+                        if to_i32(src[i + 4]) == 114 {
+                            if to_i32(src[i + 5]) == 116 {
+                                if to_i32(src[i + 6]) == 32 {
+                                    if to_i32(src[i + 7]) == 102 {
+                                        if to_i32(src[i + 8]) == 117 {
+                                            if to_i32(src[i + 9]) == 110 {
+                                                if to_i32(src[i + 10]) == 99 {
+                                                    if to_i32(src[i + 11]) == 32 {
+                                                        count = count + 1
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    out_count[0] = count
+}
+
+// ========== find_export_offsets ==========
+// Find byte offsets of all "export func " occurrences.
+
+export func find_export_offsets(
+    src: *u8,
+    src_len: i32,
+    out_offsets: *mut i32,
+    out_count: *mut i32
+) {
+    let e_splat: u8x16 = splat(101)
+    let ones: u8x16 = splat(1)
+    let zeros: u8x16 = splat(0)
+    let mut count: i32 = 0
+    let mut i: i32 = 0
+
+    while i + 16 <= src_len {
+        let chunk: u8x16 = load(src, i)
+        let cmp: u8x16 = select(chunk .== e_splat, ones, zeros)
+        let hits: i32 = to_i32(reduce_add(cmp))
+        if hits > 0 {
+            let mut j: i32 = 0
+            while j < 16 {
+                let pos: i32 = i + j
+                if pos + 12 <= src_len {
+                    if to_i32(src[pos]) == 101 {
+                        if to_i32(src[pos + 1]) == 120 {
+                            if to_i32(src[pos + 2]) == 112 {
+                                if to_i32(src[pos + 3]) == 111 {
+                                    if to_i32(src[pos + 4]) == 114 {
+                                        if to_i32(src[pos + 5]) == 116 {
+                                            if to_i32(src[pos + 6]) == 32 {
+                                                if to_i32(src[pos + 7]) == 102 {
+                                                    if to_i32(src[pos + 8]) == 117 {
+                                                        if to_i32(src[pos + 9]) == 110 {
+                                                            if to_i32(src[pos + 10]) == 99 {
+                                                                if to_i32(src[pos + 11]) == 32 {
+                                                                    out_offsets[count] = pos
+                                                                    count = count + 1
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 16
+    }
+    // Scalar tail
+    while i + 12 <= src_len {
+        if to_i32(src[i]) == 101 {
+            if to_i32(src[i + 1]) == 120 {
+                if to_i32(src[i + 2]) == 112 {
+                    if to_i32(src[i + 3]) == 111 {
+                        if to_i32(src[i + 4]) == 114 {
+                            if to_i32(src[i + 5]) == 116 {
+                                if to_i32(src[i + 6]) == 32 {
+                                    if to_i32(src[i + 7]) == 102 {
+                                        if to_i32(src[i + 8]) == 117 {
+                                            if to_i32(src[i + 9]) == 110 {
+                                                if to_i32(src[i + 10]) == 99 {
+                                                    if to_i32(src[i + 11]) == 32 {
+                                                        out_offsets[count] = i
+                                                        count = count + 1
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    out_count[0] = count
+}
+
+// ========== detect_simd_types ==========
+// Scan for SIMD type names in source.
+// Output bitmask: bit0=f32x4, bit1=f32x8, bit2=f32x16,
+//                 bit3=i32x4, bit4=i32x8, bit5=i32x16, bit6=u8x16
+// Uses u8x16 to scan for 'f'/'i'/'u' bytes, then scalar verify.
+
+export func detect_simd_types(
+    src: *u8,
+    src_len: i32,
+    out_mask: *mut i32
+) {
+    // Use separate flags to avoid addition overflow with repeated matches
+    let mut has_f32x4: i32 = 0
+    let mut has_f32x8: i32 = 0
+    let mut has_f32x16: i32 = 0
+    let mut has_i32x4: i32 = 0
+    let mut has_i32x8: i32 = 0
+    let mut has_i32x16: i32 = 0
+    let mut has_u8x16: i32 = 0
+    let mut i: i32 = 0
+
+    while i + 6 <= src_len {
+        let c0: i32 = to_i32(src[i])
+
+        // f32x? = 102,51,50,120,?
+        if c0 == 102 {
+            if to_i32(src[i + 1]) == 51 {
+                if to_i32(src[i + 2]) == 50 {
+                    if to_i32(src[i + 3]) == 120 {
+                        let c4: i32 = to_i32(src[i + 4])
+                        if c4 == 52 { has_f32x4 = 1 }
+                        if c4 == 56 { has_f32x8 = 1 }
+                        if c4 == 49 {
+                            if to_i32(src[i + 5]) == 54 { has_f32x16 = 1 }
+                        }
+                    }
+                }
+            }
+        }
+
+        // i32x? = 105,51,50,120,?
+        if c0 == 105 {
+            if to_i32(src[i + 1]) == 51 {
+                if to_i32(src[i + 2]) == 50 {
+                    if to_i32(src[i + 3]) == 120 {
+                        let c4: i32 = to_i32(src[i + 4])
+                        if c4 == 52 { has_i32x4 = 1 }
+                        if c4 == 56 { has_i32x8 = 1 }
+                        if c4 == 49 {
+                            if to_i32(src[i + 5]) == 54 { has_i32x16 = 1 }
+                        }
+                    }
+                }
+            }
+        }
+
+        // u8x16 = 117,56,120,49,54
+        if c0 == 117 {
+            if to_i32(src[i + 1]) == 56 {
+                if to_i32(src[i + 2]) == 120 {
+                    if to_i32(src[i + 3]) == 49 {
+                        if to_i32(src[i + 4]) == 54 { has_u8x16 = 1 }
+                    }
+                }
+            }
+        }
+
+        i = i + 1
+    }
+    out_mask[0] = has_f32x4 + has_f32x8 * 2 + has_f32x16 * 4 + has_i32x4 * 8 + has_i32x8 * 16 + has_i32x16 * 32 + has_u8x16 * 64
+}
+
+// ========== detect_intrinsics ==========
+// Scan for intrinsic function calls in source.
+// Output bitmask: bit0=reduce_add, bit1=fma, bit2=splat, bit3=load,
+//                 bit4=store, bit5=select, bit6=sqrt
+
+export func detect_intrinsics(
+    src: *u8,
+    src_len: i32,
+    out_mask: *mut i32
+) {
+    let mut has_reduce_add: i32 = 0
+    let mut has_fma: i32 = 0
+    let mut has_splat: i32 = 0
+    let mut has_load: i32 = 0
+    let mut has_store: i32 = 0
+    let mut has_select: i32 = 0
+    let mut has_sqrt: i32 = 0
+    let mut i: i32 = 0
+
+    while i + 11 <= src_len {
+        let c0: i32 = to_i32(src[i])
+
+        // "reduce_add(" = 114,101,100,117,99,101,95,97,100,100,40
+        if c0 == 114 {
+            if to_i32(src[i + 1]) == 101 {
+                if to_i32(src[i + 6]) == 95 {
+                    if to_i32(src[i + 7]) == 97 {
+                        if to_i32(src[i + 10]) == 40 {
+                            has_reduce_add = 1
+                        }
+                    }
+                }
+            }
+        }
+
+        // "fma(" = 102,109,97,40
+        if c0 == 102 {
+            if to_i32(src[i + 1]) == 109 {
+                if to_i32(src[i + 2]) == 97 {
+                    if to_i32(src[i + 3]) == 40 {
+                        has_fma = 1
+                    }
+                }
+            }
+        }
+
+        // "splat(" = 115,112,108,97,116,40
+        if c0 == 115 {
+            if to_i32(src[i + 1]) == 112 {
+                if to_i32(src[i + 2]) == 108 {
+                    if to_i32(src[i + 3]) == 97 {
+                        if to_i32(src[i + 5]) == 40 {
+                            has_splat = 1
+                        }
+                    }
+                }
+            }
+            // "store(" = 115,116,111,114,101,40
+            if to_i32(src[i + 1]) == 116 {
+                if to_i32(src[i + 2]) == 111 {
+                    if to_i32(src[i + 3]) == 114 {
+                        if to_i32(src[i + 5]) == 40 {
+                            has_store = 1
+                        }
+                    }
+                }
+            }
+            // "select(" = 115,101,108,101,99,116,40
+            if to_i32(src[i + 1]) == 101 {
+                if to_i32(src[i + 2]) == 108 {
+                    if to_i32(src[i + 3]) == 101 {
+                        if to_i32(src[i + 6]) == 40 {
+                            has_select = 1
+                        }
+                    }
+                }
+            }
+            // "sqrt(" = 115,113,114,116,40
+            if to_i32(src[i + 1]) == 113 {
+                if to_i32(src[i + 2]) == 114 {
+                    if to_i32(src[i + 3]) == 116 {
+                        if to_i32(src[i + 4]) == 40 {
+                            has_sqrt = 1
+                        }
+                    }
+                }
+            }
+        }
+
+        // "load(" = 108,111,97,100,40
+        if c0 == 108 {
+            if to_i32(src[i + 1]) == 111 {
+                if to_i32(src[i + 2]) == 97 {
+                    if to_i32(src[i + 3]) == 100 {
+                        if to_i32(src[i + 4]) == 40 {
+                            has_load = 1
+                        }
+                    }
+                }
+            }
+        }
+
+        i = i + 1
+    }
+    out_mask[0] = has_reduce_add + has_fma * 2 + has_splat * 4 + has_load * 8 + has_store * 16 + has_select * 32 + has_sqrt * 64
+}

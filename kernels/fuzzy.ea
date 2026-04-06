@@ -1,0 +1,192 @@
+// fuzzy.ea — Byte-histogram cosine search for eabrain.
+// Adapted from eaclaw/kernels/search.ea.
+// All SIMD paths, scalar tails where dim is not multiple of vector width.
+
+// ========== byte_histogram_embed ==========
+// Count byte frequencies into a 256-element f32 histogram.
+// out must be pre-zeroed by caller.
+// Uses SIMD u8x16 load but scalar histogram scatter (no SIMD scatter in Eä).
+
+export func byte_histogram_embed(
+    text: *u8,
+    text_len: i32,
+    out: *mut f32
+) {
+    // Zero the output buffer (256 floats)
+    let zero: f32x8 = splat(0.0)
+    for i in 0..256 step 8 {
+        store(out, i, zero)
+    }
+
+    // Count byte frequencies — scalar scatter
+    for i in 0..text_len {
+        let idx: i32 = to_i32(text[i])
+        let cur: f32 = to_f32(to_i32(out[idx]))
+        out[idx] = cur + 1.0
+    }
+}
+
+// ========== normalize_vectors ==========
+// In-place L2 normalization of n_vecs vectors of given dim.
+// Adapted from eaclaw/kernels/search.ea normalize_vectors.
+
+#[cfg(x86_64)]
+export func normalize_vectors(
+    vecs: *mut f32,
+    dim: i32,
+    n_vecs: i32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut acc: f32x8 = splat(0.0)
+        for i in 0..dim step 8 {
+            if i + 8 <= dim {
+                let d: f32x8 = load(vecs, base + i)
+                acc = fma(d, d, acc)
+            }
+        }
+        let mut norm_sq: f32 = reduce_add(acc)
+        let simd_end: i32 = (dim / 8) * 8
+        for i in simd_end..dim {
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            norm_sq = norm_sq + di * di
+        }
+        if norm_sq > 0.0 {
+            let inv_norm: f32 = 1.0 / sqrt(norm_sq)
+            let v_inv: f32x8 = splat(inv_norm)
+            for i in 0..dim step 8 {
+                if i + 8 <= dim {
+                    let d: f32x8 = load(vecs, base + i)
+                    store(vecs, base + i, d .* v_inv)
+                }
+            }
+            for i in simd_end..dim {
+                let di: f32 = to_f32(to_i32(vecs[base + i]))
+                vecs[base + i] = di * inv_norm
+            }
+        }
+    }
+}
+
+#[cfg(aarch64)]
+export func normalize_vectors(
+    vecs: *mut f32,
+    dim: i32,
+    n_vecs: i32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut acc: f32x4 = splat(0.0)
+        for i in 0..dim step 4 {
+            if i + 4 <= dim {
+                let d: f32x4 = load(vecs, base + i)
+                acc = fma(d, d, acc)
+            }
+        }
+        let mut norm_sq: f32 = reduce_add(acc)
+        let simd_end: i32 = (dim / 4) * 4
+        for i in simd_end..dim {
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            norm_sq = norm_sq + di * di
+        }
+        if norm_sq > 0.0 {
+            let inv_norm: f32 = 1.0 / sqrt(norm_sq)
+            let v_inv: f32x4 = splat(inv_norm)
+            for i in 0..dim step 4 {
+                if i + 4 <= dim {
+                    let d: f32x4 = load(vecs, base + i)
+                    store(vecs, base + i, d .* v_inv)
+                }
+            }
+            for i in simd_end..dim {
+                let di: f32 = to_f32(to_i32(vecs[base + i]))
+                vecs[base + i] = di * inv_norm
+            }
+        }
+    }
+}
+
+// ========== batch_cosine ==========
+// Cosine similarity: dot(a,b) / (||a|| * ||b||)
+// query_norm is precomputed by caller.
+// Adapted from eaclaw/kernels/search.ea batch_cosine.
+
+#[cfg(x86_64)]
+export func batch_cosine(
+    query: *f32,
+    query_norm: f32,
+    vecs: *f32,
+    dim: i32,
+    n_vecs: i32,
+    out_scores: *mut f32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut dot_acc: f32x8 = splat(0.0)
+        let mut norm_acc: f32x8 = splat(0.0)
+        for i in 0..dim step 8 {
+            if i + 8 <= dim {
+                let q: f32x8 = load(query, i)
+                let d: f32x8 = load(vecs, base + i)
+                dot_acc = fma(q, d, dot_acc)
+                norm_acc = fma(d, d, norm_acc)
+            }
+        }
+        let mut dot_sum: f32 = reduce_add(dot_acc)
+        let mut norm_sum: f32 = reduce_add(norm_acc)
+        let simd_end: i32 = (dim / 8) * 8
+        for i in simd_end..dim {
+            let qi: f32 = to_f32(to_i32(query[i]))
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            dot_sum = dot_sum + qi * di
+            norm_sum = norm_sum + di * di
+        }
+        let vec_norm: f32 = sqrt(norm_sum)
+        let denom: f32 = query_norm * vec_norm
+        if denom > 0.0 {
+            out_scores[v] = dot_sum / denom
+        } else {
+            out_scores[v] = 0.0
+        }
+    }
+}
+
+#[cfg(aarch64)]
+export func batch_cosine(
+    query: *f32,
+    query_norm: f32,
+    vecs: *f32,
+    dim: i32,
+    n_vecs: i32,
+    out_scores: *mut f32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut dot_acc: f32x4 = splat(0.0)
+        let mut norm_acc: f32x4 = splat(0.0)
+        for i in 0..dim step 4 {
+            if i + 4 <= dim {
+                let q: f32x4 = load(query, i)
+                let d: f32x4 = load(vecs, base + i)
+                dot_acc = fma(q, d, dot_acc)
+                norm_acc = fma(d, d, norm_acc)
+            }
+        }
+        let mut dot_sum: f32 = reduce_add(dot_acc)
+        let mut norm_sum: f32 = reduce_add(norm_acc)
+        let simd_end: i32 = (dim / 4) * 4
+        for i in simd_end..dim {
+            let qi: f32 = to_f32(to_i32(query[i]))
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            dot_sum = dot_sum + qi * di
+            norm_sum = norm_sum + di * di
+        }
+        let vec_norm: f32 = sqrt(norm_sum)
+        let denom: f32 = query_norm * vec_norm
+        if denom > 0.0 {
+            out_scores[v] = dot_sum / denom
+        } else {
+            out_scores[v] = 0.0
+        }
+    }
+}
