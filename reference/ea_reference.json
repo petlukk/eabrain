@@ -1,0 +1,310 @@
+{
+  "entries": [
+    {
+      "name": "reduce_add",
+      "category": "intrinsic",
+      "signature": "reduce_add(v: f32xN) -> f32",
+      "description": "Horizontal sum of all lanes in a SIMD vector"
+    },
+    {
+      "name": "fma",
+      "category": "intrinsic",
+      "signature": "fma(a: f32xN, b: f32xN, c: f32xN) -> f32xN",
+      "description": "Fused multiply-add: a*b+c"
+    },
+    {
+      "name": "splat",
+      "category": "intrinsic",
+      "signature": "splat(scalar) -> vectorN",
+      "description": "Broadcast scalar to all lanes"
+    },
+    {
+      "name": "load",
+      "category": "intrinsic",
+      "signature": "load(ptr, offset) -> vectorN",
+      "description": "Load N elements from pointer at element offset"
+    },
+    {
+      "name": "store",
+      "category": "intrinsic",
+      "signature": "store(ptr, offset, value)",
+      "description": "Store SIMD vector to pointer at element offset"
+    },
+    {
+      "name": "select",
+      "category": "intrinsic",
+      "signature": "select(cond, true_val, false_val) -> vecN",
+      "description": "Branchless per-lane selection"
+    },
+    {
+      "name": "movemask",
+      "category": "intrinsic",
+      "signature": "movemask(v: u8x16) -> i32",
+      "description": "Extract high bit of each byte to 16-bit mask. x86-64 only"
+    },
+    {
+      "name": "sqrt",
+      "category": "intrinsic",
+      "signature": "sqrt(v: f32xN) -> f32xN",
+      "description": "Per-lane square root"
+    },
+    {
+      "name": "min",
+      "category": "intrinsic",
+      "signature": "min(a: f32xN, b: f32xN) -> f32xN",
+      "description": "Per-lane minimum"
+    },
+    {
+      "name": "max",
+      "category": "intrinsic",
+      "signature": "max(a: f32xN, b: f32xN) -> f32xN",
+      "description": "Per-lane maximum"
+    },
+    {
+      "name": "reduce_max",
+      "category": "intrinsic",
+      "signature": "reduce_max(v: f32xN) -> f32",
+      "description": "Horizontal maximum"
+    },
+    {
+      "name": "reduce_min",
+      "category": "intrinsic",
+      "signature": "reduce_min(v: f32xN) -> f32",
+      "description": "Horizontal minimum"
+    },
+    {
+      "name": "reduce_mul",
+      "category": "intrinsic",
+      "signature": "reduce_mul(v: f32xN) -> f32",
+      "description": "Horizontal product"
+    },
+    {
+      "name": "shuffle",
+      "category": "intrinsic",
+      "signature": "shuffle(v: vecN, indices...) -> vecN",
+      "description": "Rearrange lanes by index"
+    },
+    {
+      "name": "broadcast",
+      "category": "intrinsic",
+      "signature": "broadcast(v: vecN, lane: i32) -> vecN",
+      "description": "Copy one lane to all"
+    },
+    {
+      "name": "extract",
+      "category": "intrinsic",
+      "signature": "extract(v: vecN, lane: i32) -> scalar",
+      "description": "Extract single lane"
+    },
+    {
+      "name": "widen_u8_f32x16",
+      "category": "intrinsic",
+      "signature": "widen_u8_f32x16(v: u8x16) -> f32x16",
+      "description": "Widen 16 bytes to 16 floats. AVX-512 only"
+    },
+    {
+      "name": "to_f32",
+      "category": "intrinsic",
+      "signature": "to_f32(v: i32 | i32xN) -> f32 | f32xN",
+      "description": "Convert i32 to f32. For float reads use to_f32(ptr[i]) directly, not to_f32(to_i32(ptr[i])) which truncates"
+    },
+    {
+      "name": "to_i32",
+      "category": "intrinsic",
+      "signature": "to_i32(v: f32 | f32xN) -> i32 | i32xN",
+      "description": "Convert f32 to i32 by truncation"
+    },
+    {
+      "name": "prefetch",
+      "category": "intrinsic",
+      "signature": "prefetch(ptr, offset)",
+      "description": "Hint to prefetch data into cache"
+    },
+    {
+      "name": "f32x4",
+      "category": "type",
+      "signature": "f32x4",
+      "description": "128-bit, 4 floats, ARM NEON native width"
+    },
+    {
+      "name": "f32x8",
+      "category": "type",
+      "signature": "f32x8",
+      "description": "256-bit, 8 floats, x86 AVX2 native width, default for x86-64"
+    },
+    {
+      "name": "f32x16",
+      "category": "type",
+      "signature": "f32x16",
+      "description": "512-bit, 16 floats, AVX-512 only, requires --avx512"
+    },
+    {
+      "name": "i32x4",
+      "category": "type",
+      "signature": "i32x4",
+      "description": "128-bit, 4 signed 32-bit ints, ARM and x86"
+    },
+    {
+      "name": "i32x8",
+      "category": "type",
+      "signature": "i32x8",
+      "description": "256-bit, 8 signed 32-bit ints, AVX2"
+    },
+    {
+      "name": "i32x16",
+      "category": "type",
+      "signature": "i32x16",
+      "description": "512-bit, 16 signed 32-bit ints, AVX-512"
+    },
+    {
+      "name": "u8x16",
+      "category": "type",
+      "signature": "u8x16",
+      "description": "128-bit, 16 unsigned bytes, text/byte pattern matching, all platforms"
+    },
+    {
+      "name": ".&",
+      "category": "operator",
+      "signature": "a .& b",
+      "description": "SIMD bitwise AND. Dot-prefix required, no scalar bitwise ops in Ea"
+    },
+    {
+      "name": ".|",
+      "category": "operator",
+      "signature": "a .| b",
+      "description": "SIMD bitwise OR"
+    },
+    {
+      "name": ".^",
+      "category": "operator",
+      "signature": "a .^ b",
+      "description": "SIMD bitwise XOR"
+    },
+    {
+      "name": ".<<",
+      "category": "operator",
+      "signature": "a .<< n",
+      "description": "SIMD left shift (v1.9.0+)"
+    },
+    {
+      "name": ".>>",
+      "category": "operator",
+      "signature": "a .>> n",
+      "description": "SIMD right shift (v1.9.0+)"
+    },
+    {
+      "name": ".==",
+      "category": "operator",
+      "signature": "a .== b",
+      "description": "Per-lane equality, returns mask for select()"
+    },
+    {
+      "name": ".>",
+      "category": "operator",
+      "signature": "a .> b",
+      "description": "Per-lane greater-than (also .<, .>=, .<=)"
+    },
+    {
+      "name": "--lib",
+      "category": "compiler_flag",
+      "signature": "ea file.ea --lib -o libname.so",
+      "description": "Produce shared library + JSON metadata"
+    },
+    {
+      "name": "--target-triple",
+      "category": "compiler_flag",
+      "signature": "ea file.ea --target-triple=aarch64-unknown-linux-gnu",
+      "description": "Cross-compile to target architecture"
+    },
+    {
+      "name": "--avx512",
+      "category": "compiler_flag",
+      "signature": "ea file.ea --avx512",
+      "description": "Enable AVX-512 (f32x16, i32x16)"
+    },
+    {
+      "name": "--emit-llvm",
+      "category": "compiler_flag",
+      "signature": "ea file.ea --emit-llvm",
+      "description": "Output LLVM IR"
+    },
+    {
+      "name": "--emit-asm",
+      "category": "compiler_flag",
+      "signature": "ea file.ea --emit-asm",
+      "description": "Output assembly"
+    },
+    {
+      "name": "--opt-level",
+      "category": "compiler_flag",
+      "signature": "ea file.ea --opt-level=3",
+      "description": "Optimization level 0-3, default 3"
+    },
+    {
+      "name": "ea bind --python",
+      "category": "compiler_flag",
+      "signature": "ea bind --python file.ea",
+      "description": "Generate Python ctypes bindings with numpy support"
+    },
+    {
+      "name": "ea bind --rust",
+      "category": "compiler_flag",
+      "signature": "ea bind --rust file.ea",
+      "description": "Generate safe Rust FFI wrappers"
+    },
+    {
+      "name": "ea bind --cpp",
+      "category": "compiler_flag",
+      "signature": "ea bind --cpp file.ea",
+      "description": "Generate C++ std::span headers"
+    },
+    {
+      "name": "ea inspect",
+      "category": "compiler_flag",
+      "signature": "ea inspect libname.so",
+      "description": "Analyze compiled kernel (instruction mix, loops, registers)"
+    },
+    {
+      "name": "--dotprod",
+      "category": "compiler_flag",
+      "signature": "ea file.ea --target-triple=aarch64-unknown-linux-gnu --dotprod",
+      "description": "Enable ARM dot-product instructions, combine with --target-triple"
+    },
+    {
+      "name": "--header",
+      "category": "compiler_flag",
+      "signature": "ea file.ea --header",
+      "description": "Generate C header"
+    },
+    {
+      "name": "to_f32(ptr[i]) not to_f32(to_i32(ptr[i]))",
+      "category": "gotcha",
+      "signature": "to_f32(ptr[i])",
+      "description": "CRITICAL float read pattern. Use to_f32(ptr[i]) directly to read floats from a pointer. to_i32() truncates the float value, losing precision. to_f32(to_i32(ptr[i])) is wrong."
+    },
+    {
+      "name": "no scalar bitwise ops",
+      "category": "gotcha",
+      "signature": ".& .| .^",
+      "description": "Ea has no scalar bitwise operators. Use dot-operators (.& .| .^) on vectors only. Attempting scalar bitwise ops is a compile error."
+    },
+    {
+      "name": "no to_u8()",
+      "category": "gotcha",
+      "signature": "i32 aliasing",
+      "description": "Ea has no to_u8() conversion. For NaN check via IEEE 754 bit inspection, use i32 aliasing with bit manipulation via i32 reinterpretation."
+    },
+    {
+      "name": "shift operators version",
+      "category": "gotcha",
+      "signature": ".<< .>>",
+      "description": "The .<< and .>> shift operators require Ea v1.9.0+. They are not available in older compiler versions."
+    },
+    {
+      "name": "ea compiler not on PATH",
+      "category": "gotcha",
+      "signature": "/root/dev/eacompute/target/release/ea",
+      "description": "The Ea compiler binary is not on PATH. Use the full path: /root/dev/eacompute/target/release/ea"
+    }
+  ]
+}
