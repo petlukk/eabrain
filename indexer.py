@@ -306,3 +306,177 @@ def read_index(path: str) -> dict:
         "sessions": sessions,
         "embeddings": embeddings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Index builder
+# ---------------------------------------------------------------------------
+
+import ctypes
+import glob
+import json
+import os
+
+
+def _load_lib(name: str) -> ctypes.CDLL:
+    """Load a .so from the lib/ directory relative to this file."""
+    lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+    return ctypes.CDLL(os.path.join(lib_dir, name))
+
+
+def _scan_ea_file(src_bytes: bytes, scan_lib) -> list:
+    """Scan a .ea file and return list of kernel dicts."""
+    src = np.frombuffer(src_bytes, dtype=np.uint8)
+    n = len(src_bytes)
+
+    # Find export offsets
+    offsets = np.zeros(256, dtype=np.int32)
+    count = np.zeros(1, dtype=np.int32)
+    scan_lib.find_export_offsets(
+        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(n),
+        offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+
+    # Detect SIMD types
+    type_mask = np.zeros(1, dtype=np.int32)
+    scan_lib.detect_simd_types(
+        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(n),
+        type_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+
+    # Detect intrinsics
+    intr_mask = np.zeros(1, dtype=np.int32)
+    scan_lib.detect_intrinsics(
+        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(n),
+        intr_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+
+    tm = int(type_mask[0])
+    if tm & 0b100:
+        simd_width = 16
+    elif tm & 0b010:
+        simd_width = 8
+    elif tm & 0b001:
+        simd_width = 4
+    else:
+        simd_width = 0
+
+    # Detect arch
+    text_lower = src_bytes.lower()
+    if b"aarch64" in text_lower or b"cfg(aarch64)" in text_lower:
+        arch = "aarch64"
+    else:
+        arch = "x86_64"
+
+    lines = src_bytes.split(b"\n")
+
+    kernels = []
+    num_exports = int(count[0])
+    for i in range(num_exports):
+        off = int(offsets[i])
+        # Skip "export func " (12 bytes)
+        name_start = off + 12
+        name_end = src_bytes.find(b"(", name_start)
+        if name_end < 0:
+            continue
+        func_name = src_bytes[name_start:name_end].decode("utf-8", errors="replace").strip()
+
+        # Compute line number (1-based)
+        line_start = src_bytes[:off].count(b"\n") + 1
+
+        # Count lines until closing brace at column 0
+        body_start = src_bytes.find(b"{", off)
+        if body_start < 0:
+            line_count = 1
+        else:
+            depth = 0
+            pos = body_start
+            while pos < n:
+                ch = src_bytes[pos:pos+1]
+                if ch == b"{":
+                    depth += 1
+                elif ch == b"}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                pos += 1
+            line_count = src_bytes[off:pos+1].count(b"\n") + 1
+
+        kernels.append({
+            "func_name": func_name,
+            "line_start": line_start,
+            "line_count": line_count,
+            "arch": arch,
+            "simd_width": simd_width,
+            "intrinsics_mask": int(intr_mask[0]),
+            "flags": 0,
+        })
+
+    return kernels
+
+
+def _byte_histogram(text_bytes: bytes) -> np.ndarray:
+    """Compute 256-dim byte histogram and L2-normalize."""
+    hist = np.zeros(256, dtype=np.float32)
+    for b in text_bytes:
+        hist[b] += 1.0
+    norm = np.linalg.norm(hist)
+    if norm > 0:
+        hist /= norm
+    return hist
+
+
+def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
+    """Build and write the binary index.
+
+    Returns stats dict: kernel_count, ref_count, file_count.
+    """
+    scan_lib = _load_lib("libscan.so")
+
+    # Load reference entries
+    with open(ref_path, "r", encoding="utf-8") as f:
+        ref_data = json.load(f)
+    refs = ref_data.get("entries", [])
+
+    kernels = []
+    embeddings = []
+    file_count = 0
+
+    for project_dir in project_dirs:
+        project_dir = os.path.expanduser(project_dir)
+        ea_files = glob.glob(os.path.join(project_dir, "**", "*.ea"), recursive=True)
+        for ea_path in sorted(ea_files):
+            try:
+                with open(ea_path, "rb") as f:
+                    src_bytes = f.read()
+            except OSError:
+                continue
+
+            file_count += 1
+            file_kernels = _scan_ea_file(src_bytes, scan_lib)
+            emb = _byte_histogram(src_bytes)
+
+            for k in file_kernels:
+                k["path"] = ea_path
+                kernels.append(k)
+                embeddings.append(emb)
+
+    if embeddings:
+        emb_array = np.stack(embeddings, axis=0)
+    else:
+        emb_array = np.zeros((0, 256), dtype=np.float32)
+
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(os.path.abspath(index_path)), exist_ok=True)
+
+    write_index(index_path, kernels, refs, [], emb_array)
+
+    return {
+        "kernel_count": len(kernels),
+        "ref_count": len(refs),
+        "file_count": file_count,
+    }
