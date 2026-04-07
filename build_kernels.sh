@@ -28,9 +28,7 @@ build_kernel() {
 }
 
 build_kernel "$KERNEL_DIR/scan.ea"
-build_kernel "$KERNEL_DIR/search.ea"
 build_kernel "$KERNEL_DIR/fuzzy.ea"
-build_kernel "$KERNEL_DIR/ref_search.ea"
 
 echo ""
 echo "Done. Built $(ls "$LIB_DIR"/*.so 2>/dev/null | wc -l) shared libraries."

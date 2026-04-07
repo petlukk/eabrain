@@ -39,6 +39,7 @@ def _load_config(env_path: str = None) -> dict:
     cfg.setdefault("index_path", _DEFAULT_INDEX)
     cfg.setdefault("max_source_lines", 50)
     cfg.setdefault("max_session_entries", 100)
+    cfg.setdefault("ea_compiler", _EA_COMPILER)
     return cfg
 
 
@@ -215,7 +216,7 @@ def cmd_status(args, cfg):
     else:
         print(f"eabrain v{_VERSION}  (no index — run: eabrain index)")
         print(f"Projects: {len(cfg['projects'])}")
-    print(f"Ea compiler: {_EA_COMPILER}")
+    print(f"Ea compiler: {cfg['ea_compiler']}")
     print()
     print("Common commands:")
     print("  eabrain index              # build index")
