@@ -316,6 +316,7 @@ import ctypes
 import glob
 import json
 import os
+import re
 
 
 def _load_lib(name: str) -> ctypes.CDLL:
@@ -430,6 +431,121 @@ def _byte_histogram(text_bytes: bytes) -> np.ndarray:
     return hist
 
 
+# Matches a single signature within a doc comment. Doc-comment lines may
+# contain either one signature:
+#   /// maddubs_i16(u8x64, i8x64) -> i16x32  (AVX-512BW vpmaddubsw)
+# or several comma-separated variants on one line:
+#   /// cvt_f16_f32(i16x4) -> f32x4, cvt_f16_f32(i16x8) -> f32x8
+_SIG_RE = re.compile(r"(\w+)\(([^)]*)\)\s*->\s*([A-Za-z_][\w]*)")
+_DOC_PREFIX_RE = re.compile(r"^\s*///\s*(.*)$")
+_TAG_RE = re.compile(r"\(([^()]*)\)")
+
+# Lane-pattern (e.g. "8x16", "32x4") marks a paren as an argument list,
+# not a descriptive tag. Same for ": Type" forms (`acc: i32x4`).
+_ARGLIST_RE = re.compile(r"\d+x\d+|:\s*\w")
+
+# Matches string literals used as match arms in the intrinsics dispatch:
+#   "vdot_i32" => Some(...)
+#   "reduce_add" | "reduce_max" | "reduce_min" => Some(...)
+_DISPATCH_ARM_RE = re.compile(r'"([a-z][\w]*)"\s*(?:\||=>|if)')
+
+
+def scrape_eacompute_intrinsics(project_dirs: list) -> list:
+    """Scrape intrinsic signatures from eacompute typeck source.
+
+    Walks each project_dir looking for `src/typeck/intrinsics_*.rs` files
+    (the Eä compiler's per-family intrinsic checkers). Doc comments on the
+    `check_*` functions follow a consistent pattern:
+
+        /// name(args) -> return_type  (optional descriptive tag)
+
+    Returns a list of ref-shaped dicts, one per unique intrinsic name, with
+    all width variants collapsed into a single semicolon-joined signature
+    (truncated to fit the 128-byte binary record).
+    """
+    found = {}  # name -> {"signatures": [...], "tags": [...]}
+    dispatch_names = set()  # names from the intrinsics dispatch match
+
+    for project_dir in project_dirs:
+        project_dir = os.path.expanduser(project_dir)
+        typeck_dir = os.path.join(project_dir, "src", "typeck")
+        if not os.path.isdir(typeck_dir):
+            continue
+
+        # Pass 1: scan intrinsics_*.rs for doc-comment signatures.
+        for rs_path in sorted(glob.glob(os.path.join(typeck_dir, "intrinsics_*.rs"))):
+            try:
+                with open(rs_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except OSError:
+                continue
+            for line in lines:
+                doc = _DOC_PREFIX_RE.match(line)
+                if not doc:
+                    continue
+                body = doc.group(1)
+                matches = _SIG_RE.findall(body)
+                if not matches:
+                    continue
+                # Descriptive tags: parens that contain neither an arrow,
+                # lane pattern (e.g. "8x16"), nor a ": Type" fragment.
+                tags = [
+                    t.strip() for t in _TAG_RE.findall(body)
+                    if "->" not in t and not _ARGLIST_RE.search(t)
+                ]
+                for name, args, ret in matches:
+                    sig = f"{name}({args.strip()}) -> {ret}"
+                    entry = found.setdefault(name, {"signatures": [], "tags": []})
+                    if sig not in entry["signatures"]:
+                        entry["signatures"].append(sig)
+                    for tag in tags:
+                        if tag and tag not in entry["tags"]:
+                            entry["tags"].append(tag)
+
+        # Pass 2: scan intrinsics.rs dispatch match for authoritative names.
+        dispatch_path = os.path.join(typeck_dir, "intrinsics.rs")
+        if os.path.isfile(dispatch_path):
+            try:
+                with open(dispatch_path, "r", encoding="utf-8") as f:
+                    dispatch_src = f.read()
+            except OSError:
+                dispatch_src = ""
+            for m in _DISPATCH_ARM_RE.finditer(dispatch_src):
+                dispatch_names.add(m.group(1))
+
+    # Anything in the dispatch match but not yet in `found` is a known
+    # intrinsic with no doc-comment signature — still surface it so
+    # `eabrain ref` doesn't say "No results found".
+    for name in dispatch_names:
+        if name not in found:
+            found[name] = {
+                "signatures": [f"{name}(...) -> ?"],
+                "tags": ["no doc comment; see src/typeck/intrinsics_*.rs"],
+            }
+
+    results = []
+    for name, data in sorted(found.items()):
+        # Join width variants with "; " and truncate to fit the 127-byte limit
+        # (leaving room for a terminator).
+        sig_joined = "; ".join(data["signatures"])
+        if len(sig_joined.encode("utf-8")) > 127:
+            sig_joined = sig_joined.encode("utf-8")[:124].decode("utf-8", "ignore") + "..."
+        # Description: the first few tags, or a fallback marker
+        if data["tags"]:
+            desc = "; ".join(data["tags"])
+            if len(desc.encode("utf-8")) > 255:
+                desc = desc.encode("utf-8")[:252].decode("utf-8", "ignore") + "..."
+        else:
+            desc = "auto-extracted from eacompute src/typeck (not yet curated)"
+        results.append({
+            "name": name,
+            "category": "intrinsic",
+            "signature": sig_joined,
+            "description": desc,
+        })
+    return results
+
+
 def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
     """Build and write the binary index.
 
@@ -437,10 +553,19 @@ def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
     """
     scan_lib = _load_lib("libscan.so")
 
-    # Load reference entries
+    # Load reference entries (static curated JSON)
     with open(ref_path, "r", encoding="utf-8") as f:
         ref_data = json.load(f)
     refs = ref_data.get("entries", [])
+
+    # Merge in auto-scraped intrinsics from eacompute source. Static JSON wins
+    # on name collisions — curated descriptions are authoritative. Scraped
+    # entries only fill gaps for intrinsics not yet documented in the JSON.
+    known_names = {r["name"] for r in refs}
+    for scraped in scrape_eacompute_intrinsics(project_dirs):
+        if scraped["name"] not in known_names:
+            refs.append(scraped)
+            known_names.add(scraped["name"])
 
     kernels = []
     embeddings = []

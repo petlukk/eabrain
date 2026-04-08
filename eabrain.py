@@ -152,9 +152,17 @@ def cmd_search(args, cfg):
 
 
 def cmd_ref(args, cfg):
-    with open(_ref_path()) as f:
-        data = json.load(f)
-    entries = data.get("entries", [])
+    # Read from the binary index, which contains the curated JSON entries
+    # merged with auto-scraped intrinsics from eacompute source. Fall back
+    # to the static JSON if the index is missing (pre-first-index state).
+    from indexer import read_index
+    if os.path.exists(cfg["index_path"]):
+        idx = read_index(cfg["index_path"])
+        entries = idx["refs"]
+    else:
+        with open(_ref_path()) as f:
+            data = json.load(f)
+        entries = data.get("entries", [])
     query = args.query.lower()
 
     # Exact match first, then substring
