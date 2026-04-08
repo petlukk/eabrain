@@ -69,3 +69,60 @@ def test_scraper_handles_missing_project_dir():
     with tempfile.TemporaryDirectory() as empty:
         results = scrape_eacompute_intrinsics([empty, "/nonexistent/path"])
         assert results == []
+
+
+def test_find_arrow_pairs_kernel():
+    """Direct test of the scan_rust.ea SIMD kernel: every "->" in the input
+    must appear in the returned offsets, and no false positives."""
+    from indexer import _find_arrow_offsets, _load_scan_rust_lib
+
+    lib = _load_scan_rust_lib()
+    # Kernel may be absent in pre-build state; test both paths below.
+
+    # Crafted input with known arrow positions.
+    src = b"fn a() -> i32 { 1 }\n/// foo(a) -> b\n// minus- sign\n"
+    expected = [
+        src.index(b"->"),
+        src.index(b"->", src.index(b"->") + 1),
+    ]
+
+    # SIMD path (if kernel is built).
+    if lib is not None:
+        simd_offsets = _find_arrow_offsets(src, lib)
+        assert simd_offsets == expected, (
+            f"SIMD kernel returned {simd_offsets}, expected {expected}"
+        )
+
+    # Pure-Python fallback path (force by passing None).
+    py_offsets = _find_arrow_offsets(src, None)
+    assert py_offsets == expected, (
+        f"Python fallback returned {py_offsets}, expected {expected}"
+    )
+
+
+@pytest.mark.skipif(not HAS_EACOMPUTE, reason="eacompute source not available")
+def test_simd_and_python_scrapers_agree():
+    """The SIMD-backed scraper and the pure-Python fallback must return
+    byte-identical results for the same input (modulo the lib being None)."""
+    from indexer import _find_arrow_offsets, _load_scan_rust_lib
+
+    lib = _load_scan_rust_lib()
+    if lib is None:
+        pytest.skip("scan_rust.ea kernel not built")
+
+    # Test on a real eacompute intrinsics source file.
+    rs_path = os.path.join(
+        EACOMPUTE_DIR, "src", "typeck", "intrinsics_dotprod.rs"
+    )
+    if not os.path.isfile(rs_path):
+        pytest.skip("intrinsics_dotprod.rs not present")
+    with open(rs_path, "rb") as f:
+        src_bytes = f.read()
+
+    simd_offsets = _find_arrow_offsets(src_bytes, lib)
+    py_offsets = _find_arrow_offsets(src_bytes, None)
+    assert simd_offsets == py_offsets, (
+        f"SIMD/Python disagreement:\n"
+        f"  SIMD ({len(simd_offsets)}): {simd_offsets[:10]}...\n"
+        f"  Py   ({len(py_offsets)}):   {py_offsets[:10]}..."
+    )

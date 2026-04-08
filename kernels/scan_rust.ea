@@ -1,0 +1,70 @@
+// scan_rust.ea — SIMD scanner for Rust source files.
+//
+// Finds all byte offsets where the 2-byte sequence "->" appears in the
+// source. Used by eabrain's intrinsic scraper to locate candidate
+// signature lines in src/typeck/intrinsics_*.rs. Python post-processes
+// each hit to verify the line is a doc comment and extract the
+// name/args/return-type triple.
+//
+// Pattern: use u8x16 SIMD compare to find '-' bytes (byte 45) in a
+// 16-byte window. For each hit, scalar-verify that the next byte is
+// '>' (byte 62). This mirrors the established scan.ea pattern of
+// SIMD-find-then-scalar-verify.
+
+// ========== find_arrow_pairs ==========
+// Writes byte offsets of each "->" occurrence into out_offsets.
+// Caps at out_max offsets to avoid overflow. Writes total count to
+// out_count[0].
+
+export func find_arrow_pairs(
+    src: *u8,
+    src_len: i32,
+    out_offsets: *mut i32,
+    out_max: i32,
+    out_count: *mut i32
+) {
+    let dash_splat: u8x16 = splat(45)
+    let ones: u8x16 = splat(1)
+    let zeros: u8x16 = splat(0)
+    let mut count: i32 = 0
+    let mut i: i32 = 0
+
+    while i + 16 <= src_len {
+        let chunk: u8x16 = load(src, i)
+        let cmp: u8x16 = select(chunk .== dash_splat, ones, zeros)
+        let hits: i32 = to_i32(reduce_add(cmp))
+        if hits > 0 {
+            let mut j: i32 = 0
+            while j < 16 {
+                let pos: i32 = i + j
+                if pos + 1 < src_len {
+                    if to_i32(src[pos]) == 45 {
+                        if to_i32(src[pos + 1]) == 62 {
+                            if count < out_max {
+                                out_offsets[count] = pos
+                                count = count + 1
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 16
+    }
+
+    // Scalar tail
+    while i + 1 < src_len {
+        if to_i32(src[i]) == 45 {
+            if to_i32(src[i + 1]) == 62 {
+                if count < out_max {
+                    out_offsets[count] = i
+                    count = count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    out_count[0] = count
+}

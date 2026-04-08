@@ -436,8 +436,11 @@ def _byte_histogram(text_bytes: bytes) -> np.ndarray:
 #   /// maddubs_i16(u8x64, i8x64) -> i16x32  (AVX-512BW vpmaddubsw)
 # or several comma-separated variants on one line:
 #   /// cvt_f16_f32(i16x4) -> f32x4, cvt_f16_f32(i16x8) -> f32x8
+#
+# The SIMD kernel in scan_rust.ea locates every "->" byte pair in the
+# source; this regex then pulls name/args/ret from the context around
+# each hit. The regex runs on a tiny line-sized slice, not the whole file.
 _SIG_RE = re.compile(r"(\w+)\(([^)]*)\)\s*->\s*([A-Za-z_][\w]*)")
-_DOC_PREFIX_RE = re.compile(r"^\s*///\s*(.*)$")
 _TAG_RE = re.compile(r"\(([^()]*)\)")
 
 # Lane-pattern (e.g. "8x16", "32x4") marks a paren as an argument list,
@@ -448,6 +451,78 @@ _ARGLIST_RE = re.compile(r"\d+x\d+|:\s*\w")
 #   "vdot_i32" => Some(...)
 #   "reduce_add" | "reduce_max" | "reduce_min" => Some(...)
 _DISPATCH_ARM_RE = re.compile(r'"([a-z][\w]*)"\s*(?:\||=>|if)')
+
+
+def _load_scan_rust_lib():
+    """Try to load libscan_rust.so. Returns None if unavailable (pre-first
+    kernel-build state), in which case the scraper falls back to a pure-Python
+    byte scan."""
+    try:
+        lib = _load_lib("libscan_rust.so")
+        lib.find_arrow_pairs.argtypes = [
+            ctypes.POINTER(ctypes.c_uint8),
+            ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32),
+            ctypes.c_int32,
+            ctypes.POINTER(ctypes.c_int32),
+        ]
+        lib.find_arrow_pairs.restype = None
+        return lib
+    except OSError:
+        return None
+
+
+def _find_arrow_offsets(src_bytes: bytes, lib) -> list:
+    """Return byte offsets of every "->" occurrence in src_bytes.
+
+    Uses the SIMD Eä kernel when available, falls back to str.find() when
+    the shared library hasn't been built yet.
+    """
+    if lib is None:
+        # Pure-Python fallback — straightforward byte search.
+        offsets = []
+        start = 0
+        while True:
+            idx = src_bytes.find(b"->", start)
+            if idx < 0:
+                break
+            offsets.append(idx)
+            start = idx + 1
+        return offsets
+
+    src = np.frombuffer(src_bytes, dtype=np.uint8)
+    n = len(src_bytes)
+    # Generous upper bound: a typical intrinsics_*.rs has tens of arrows,
+    # but the kernel caps at out_max regardless.
+    out_max = max(1024, n // 32)
+    offsets = np.zeros(out_max, dtype=np.int32)
+    count = np.zeros(1, dtype=np.int32)
+    lib.find_arrow_pairs(
+        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(n),
+        offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        ctypes.c_int32(out_max),
+        count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+    return offsets[: int(count[0])].tolist()
+
+
+def _line_bounds(src_bytes: bytes, pos: int) -> tuple:
+    """Return (start, end) byte offsets of the line containing `pos`."""
+    start = src_bytes.rfind(b"\n", 0, pos) + 1  # -1 + 1 = 0 if not found
+    end = src_bytes.find(b"\n", pos)
+    if end < 0:
+        end = len(src_bytes)
+    return start, end
+
+
+def _is_doc_comment_line(src_bytes: bytes, line_start: int, arrow_pos: int) -> bool:
+    """True if the byte range [line_start, arrow_pos) begins (after leading
+    whitespace) with `///`."""
+    i = line_start
+    while i < arrow_pos and src_bytes[i : i + 1] in (b" ", b"\t"):
+        i += 1
+    return src_bytes[i : i + 3] == b"///"
 
 
 def scrape_eacompute_intrinsics(project_dirs: list) -> list:
@@ -465,6 +540,7 @@ def scrape_eacompute_intrinsics(project_dirs: list) -> list:
     """
     found = {}  # name -> {"signatures": [...], "tags": [...]}
     dispatch_names = set()  # names from the intrinsics dispatch match
+    scan_lib = _load_scan_rust_lib()
 
     for project_dir in project_dirs:
         project_dir = os.path.expanduser(project_dir)
@@ -473,22 +549,33 @@ def scrape_eacompute_intrinsics(project_dirs: list) -> list:
             continue
 
         # Pass 1: scan intrinsics_*.rs for doc-comment signatures.
+        #
+        # The SIMD Eä kernel `find_arrow_pairs` locates every "->" byte pair
+        # in the source. Only doc-comment lines (prefix "///") produce
+        # ref entries — we check each hit's surrounding line.
         for rs_path in sorted(glob.glob(os.path.join(typeck_dir, "intrinsics_*.rs"))):
             try:
-                with open(rs_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
+                with open(rs_path, "rb") as f:
+                    src_bytes = f.read()
             except OSError:
                 continue
-            for line in lines:
-                doc = _DOC_PREFIX_RE.match(line)
-                if not doc:
+
+            arrow_offsets = _find_arrow_offsets(src_bytes, scan_lib)
+            seen_lines = set()  # avoid double-processing lines with multiple arrows
+            for pos in arrow_offsets:
+                line_start, line_end = _line_bounds(src_bytes, pos)
+                if line_start in seen_lines:
                     continue
-                body = doc.group(1)
+                seen_lines.add(line_start)
+                if not _is_doc_comment_line(src_bytes, line_start, pos):
+                    continue
+
+                # Decode just this line. Strip the "///" prefix for regex use.
+                line = src_bytes[line_start:line_end].decode("utf-8", "ignore")
+                body = line.lstrip().lstrip("/").lstrip()
                 matches = _SIG_RE.findall(body)
                 if not matches:
                     continue
-                # Descriptive tags: parens that contain neither an arrow,
-                # lane pattern (e.g. "8x16"), nor a ": Type" fragment.
                 tags = [
                     t.strip() for t in _TAG_RE.findall(body)
                     if "->" not in t and not _ARGLIST_RE.search(t)
