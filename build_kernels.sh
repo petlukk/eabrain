@@ -30,6 +30,7 @@ build_kernel() {
 build_kernel "$KERNEL_DIR/scan.ea"
 build_kernel "$KERNEL_DIR/fuzzy.ea"
 build_kernel "$KERNEL_DIR/scan_rust.ea"
+build_kernel "$KERNEL_DIR/substr.ea"
 
 echo ""
 echo "Done. Built $(ls "$LIB_DIR"/*.so 2>/dev/null | wc -l) shared libraries."

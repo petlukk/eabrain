@@ -1,0 +1,80 @@
+// kernels/substr.ea — SIMD substring search.
+//
+// Generalized version of the scan.ea pattern. Uses u8x16 to scan for
+// the first byte of the needle in 16-byte windows, then scalar-verifies
+// the remaining needle bytes at each candidate position.
+
+export func substr_search(
+    haystack: *u8,
+    haystack_len: i32,
+    needle: *u8,
+    needle_len: i32,
+    out_offsets: *mut i32,
+    out_max: i32,
+    out_count: *mut i32
+) {
+    let first_byte: i32 = to_i32(needle[0])
+    let first_splat: u8x16 = splat(needle[0])
+    let ones: u8x16 = splat(1)
+    let zeros: u8x16 = splat(0)
+    let mut count: i32 = 0
+    let mut i: i32 = 0
+
+    // SIMD scan: 16 bytes at a time, look for first byte of needle
+    while i + 16 <= haystack_len {
+        let chunk: u8x16 = load(haystack, i)
+        let cmp: u8x16 = select(chunk .== first_splat, ones, zeros)
+        let hits: i32 = to_i32(reduce_add(cmp))
+        if hits > 0 {
+            let mut j: i32 = 0
+            while j < 16 {
+                let pos: i32 = i + j
+                if pos + needle_len <= haystack_len {
+                    if to_i32(haystack[pos]) == first_byte {
+                        let mut match: i32 = 1
+                        let mut k: i32 = 1
+                        while k < needle_len {
+                            if to_i32(haystack[pos + k]) != to_i32(needle[k]) {
+                                match = 0
+                                k = needle_len
+                            }
+                            k = k + 1
+                        }
+                        if match == 1 {
+                            if count < out_max {
+                                out_offsets[count] = pos
+                                count = count + 1
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 16
+    }
+
+    // Scalar tail
+    while i + needle_len <= haystack_len {
+        if to_i32(haystack[i]) == first_byte {
+            let mut match: i32 = 1
+            let mut k: i32 = 1
+            while k < needle_len {
+                if to_i32(haystack[i + k]) != to_i32(needle[k]) {
+                    match = 0
+                    k = needle_len
+                }
+                k = k + 1
+            }
+            if match == 1 {
+                if count < out_max {
+                    out_offsets[count] = i
+                    count = count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    out_count[0] = count
+}
