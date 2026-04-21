@@ -123,14 +123,9 @@ def cmd_search(args, cfg):
 
     if args.fuzzy:
         fuzzy_lib = _load_lib("libfuzzy.so")
-        # Build byte histogram for query
-        query_bytes = query.encode("utf-8")
-        hist = np.zeros(256, dtype=np.float32)
-        for b in query_bytes:
-            hist[b] += 1.0
+        from indexer import _simd_byte_histogram
+        hist = _simd_byte_histogram(query.encode("utf-8"))
         norm_val = float(np.linalg.norm(hist))
-        if norm_val > 0:
-            hist /= norm_val
 
         emb = idx["embeddings"]
         n = len(kernels)

@@ -431,6 +431,27 @@ def _byte_histogram(text_bytes: bytes) -> np.ndarray:
     return hist
 
 
+def _simd_byte_histogram(text_bytes: bytes) -> np.ndarray:
+    """Compute 256-dim byte histogram using SIMD kernel, then L2-normalize."""
+    hist = np.zeros(256, dtype=np.float32)
+    if len(text_bytes) == 0:
+        return hist
+    src = np.frombuffer(text_bytes, dtype=np.uint8)
+    lib = _load_lib("libfuzzy.so")
+    lib.byte_histogram_embed(
+        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(text_bytes)),
+        hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
+    # L2 normalize (using SIMD normalize_vectors for a single vector)
+    lib.normalize_vectors(
+        hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        ctypes.c_int32(256),
+        ctypes.c_int32(1),
+    )
+    return hist
+
+
 # Matches a single signature within a doc comment. Doc-comment lines may
 # contain either one signature:
 #   /// maddubs_i16(u8x64, i8x64) -> i16x32  (AVX-512BW vpmaddubsw)
@@ -670,7 +691,10 @@ def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
 
             file_count += 1
             file_kernels = _scan_ea_file(src_bytes, scan_lib)
-            emb = _byte_histogram(src_bytes)
+            try:
+                emb = _simd_byte_histogram(src_bytes)
+            except OSError:
+                emb = _byte_histogram(src_bytes)
 
             for k in file_kernels:
                 k["path"] = ea_path
