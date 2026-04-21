@@ -6,14 +6,29 @@ merges them into the ref list without clobbering the curated JSON.
 """
 
 import os
+import shutil
 import tempfile
 
 import pytest
 
 from indexer import scrape_eacompute_intrinsics
 
-EACOMPUTE_DIR = "/root/dev/eacompute"
-HAS_EACOMPUTE = os.path.isdir(os.path.join(EACOMPUTE_DIR, "src", "typeck"))
+
+def _resolve_eacompute_dir() -> str | None:
+    env = os.environ.get("EACOMPUTE_DIR")
+    if env and os.path.isdir(env):
+        return env
+    ea = shutil.which("ea") or os.environ.get("EA")
+    if ea and os.path.isfile(ea):
+        # .../eacompute/target/release/ea → .../eacompute
+        parent = os.path.dirname(os.path.dirname(os.path.dirname(ea)))
+        if os.path.isdir(os.path.join(parent, "src", "typeck")):
+            return parent
+    return None
+
+
+EACOMPUTE_DIR = _resolve_eacompute_dir()
+HAS_EACOMPUTE = EACOMPUTE_DIR is not None
 
 
 @pytest.mark.skipif(not HAS_EACOMPUTE, reason="eacompute source not available")

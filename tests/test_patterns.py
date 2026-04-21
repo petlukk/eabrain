@@ -1,7 +1,44 @@
 import os
+import shutil
 import subprocess
 
+import pytest
+
 EABRAIN = os.path.join(os.path.dirname(__file__), "..", "eabrain.py")
+
+
+def _resolve_autoresearch_dir() -> str | None:
+    env = os.environ.get("AUTORESEARCH_DIR")
+    if env and os.path.isdir(env):
+        return env
+    ec_env = os.environ.get("EACOMPUTE_DIR")
+    if ec_env:
+        candidate = os.path.join(ec_env, "autoresearch", "kernels")
+        if os.path.isdir(candidate):
+            return candidate
+    ea = shutil.which("ea") or os.environ.get("EA")
+    if ea and os.path.isfile(ea):
+        parent = os.path.dirname(os.path.dirname(os.path.dirname(ea)))
+        candidate = os.path.join(parent, "autoresearch", "kernels")
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def _has_benchmark_data(ar_dir: str | None) -> bool:
+    if not ar_dir:
+        return False
+    for name in os.listdir(ar_dir):
+        if os.path.isfile(os.path.join(ar_dir, name, "history.json")):
+            return True
+    return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _has_benchmark_data(_resolve_autoresearch_dir()),
+    reason="autoresearch benchmark data (history.json) not present on this machine",
+)
+
 
 def run(args):
     return subprocess.run(

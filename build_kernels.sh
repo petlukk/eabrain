@@ -1,14 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-EA="${EA:-/root/dev/eacompute/target/release/ea}"
+EA="${EA:-$(command -v ea || true)}"
 KERNEL_DIR="$(dirname "$0")/kernels"
 LIB_DIR="$(dirname "$0")/lib"
 
 mkdir -p "$LIB_DIR"
 
-if [ ! -f "$EA" ]; then
-    echo "ERROR: ea compiler not found at $EA"
+if [ -z "$EA" ] || [ ! -x "$EA" ]; then
+    echo "ERROR: ea compiler not found. Set EA=/path/to/ea or put 'ea' on PATH." >&2
     exit 1
 fi
 

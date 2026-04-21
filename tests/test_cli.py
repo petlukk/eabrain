@@ -5,6 +5,13 @@ import pytest
 
 EABRAIN = os.path.join(os.path.dirname(__file__), "..", "eabrain.py")
 
+MINIMAL_KERNEL = """// test fixture
+export func batch_cosine(query: *f32, vecs: *f32, dim: i32, out: *mut f32) {
+    let acc: f32x8 = splat(0.0)
+    out[0] = reduce_add(acc)
+}
+"""
+
 
 def run(args, config_path=None):
     cmd = ["python3", EABRAIN] + args
@@ -16,8 +23,12 @@ def run(args, config_path=None):
 
 @pytest.fixture
 def config_file(tmp_path):
+    project = tmp_path / "fake_project"
+    (project / "kernels").mkdir(parents=True)
+    (project / "kernels" / "sample.ea").write_text(MINIMAL_KERNEL)
+
     config = {
-        "projects": ["/root/dev/eaclaw", "/root/dev/eakv"],
+        "projects": [str(project)],
         "index_path": str(tmp_path / "index.bin"),
         "max_source_lines": 50,
         "max_session_entries": 100,

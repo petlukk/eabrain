@@ -8,3 +8,9 @@ build/
 dist/
 index.bin
 .pytest_cache/
+
+# ea bind side-effect artifacts — regenerated on every build
+/fuzzy.py
+/scan.py
+/scan_rust.py
+/kernels/*.ea.json

@@ -81,13 +81,14 @@ def test_detect_intrinsics(lib):
     assert m & 4 != 0, "splat should be detected"
     assert m & 8 != 0, "load should be detected"
 
-def test_count_exports_real_file(lib):
-    """Test against a real .ea kernel file."""
-    real_path = "/root/dev/eaclaw/kernels/search.ea"
-    if not os.path.exists(real_path):
-        pytest.skip("eaclaw not available")
-    with open(real_path, "rb") as f:
-        data = f.read()
+def test_count_exports_multi(lib):
+    """A source with four distinct exports must be counted correctly."""
+    data = b"""// multi-export fixture
+export func batch_cosine(a: *f32, b: *f32, n: i32) { }
+export func batch_dot(a: *f32, b: *f32, n: i32) { }
+export func batch_sum(a: *f32, n: i32) { }
+export func batch_max(a: *f32, n: i32) { }
+"""
     src = np.frombuffer(data, dtype=np.uint8)
     count = np.zeros(1, dtype=np.int32)
     lib.count_exports(
@@ -95,5 +96,4 @@ def test_count_exports_real_file(lib):
         ctypes.c_int32(len(data)),
         count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
     )
-    # eaclaw/search.ea has multiple exports (batch_dot, batch_cosine, etc.)
-    assert count[0] >= 4, f"Expected >=4 exports, got {count[0]}"
+    assert count[0] == 4, f"Expected 4 exports, got {count[0]}"

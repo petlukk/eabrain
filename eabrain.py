@@ -5,27 +5,37 @@ import argparse
 import ctypes
 import json
 import os
+import shutil
 import sys
 import time
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-_DEFAULT_PROJECTS = [
-    "/root/dev/eacompute",
-    "/root/dev/eakv",
-    "/root/dev/eaclaw",
-    "/root/dev/Olorin",
-    "/root/dev/Cougar",
-    "/root/dev/eachacha",
-]
 _DEFAULT_INDEX = os.path.expanduser("~/.eabrain/index.bin")
-_EA_COMPILER = "/root/dev/eacompute/target/release/ea"
 _VERSION = "0.1.0"
 _LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+
+
+def _resolve_ea_compiler() -> str | None:
+    """Locate the ea compiler via $EA or PATH. Returns None if not found."""
+    env = os.environ.get("EA")
+    if env and os.path.isfile(env) and os.access(env, os.X_OK):
+        return env
+    return shutil.which("ea")
+
+
+def _resolve_eacompute_dir(ea_compiler: str | None) -> str | None:
+    """Locate eacompute source tree via $EACOMPUTE_DIR or derive from the ea
+    compiler's install path (.../eacompute/target/release/ea → .../eacompute)."""
+    env = os.environ.get("EACOMPUTE_DIR")
+    if env and os.path.isdir(env):
+        return env
+    if ea_compiler:
+        # .../eacompute/target/release/ea → .../eacompute
+        parent = os.path.dirname(os.path.dirname(os.path.dirname(ea_compiler)))
+        if os.path.isdir(os.path.join(parent, "src")):
+            return parent
+    return None
 
 
 def _load_config(env_path: str = None) -> dict:
@@ -35,11 +45,18 @@ def _load_config(env_path: str = None) -> dict:
             cfg = json.load(f)
     else:
         cfg = {}
-    cfg.setdefault("projects", _DEFAULT_PROJECTS)
+    cfg.setdefault("projects", [])
     cfg.setdefault("index_path", _DEFAULT_INDEX)
     cfg.setdefault("max_source_lines", 50)
     cfg.setdefault("max_session_entries", 100)
-    cfg.setdefault("ea_compiler", _EA_COMPILER)
+
+    if "ea_compiler" not in cfg:
+        cfg["ea_compiler"] = _resolve_ea_compiler()
+    if "eacompute_dir" not in cfg:
+        cfg["eacompute_dir"] = _resolve_eacompute_dir(cfg.get("ea_compiler"))
+    if "autoresearch_dir" not in cfg:
+        ec = cfg.get("eacompute_dir")
+        cfg["autoresearch_dir"] = os.path.join(ec, "autoresearch", "kernels") if ec else None
     return cfg
 
 
@@ -88,6 +105,10 @@ def cmd_index(args, cfg):
     projects = cfg["projects"]
     if args.projects:
         projects = [p.strip() for p in args.projects.split(",")]
+    if not projects:
+        print("No projects configured. Set 'projects' in ~/.eabrain/config.json "
+              "or pass --projects /path1,/path2", file=sys.stderr)
+        sys.exit(1)
     stats = build_index(projects, _ref_path(), cfg["index_path"])
     print(f"Indexed {stats['kernel_count']} kernels from {stats['file_count']} files, "
           f"{stats['ref_count']} ref entries -> {cfg['index_path']}")
@@ -224,7 +245,7 @@ def cmd_status(args, cfg):
     else:
         print(f"eabrain v{_VERSION}  (no index — run: eabrain index)")
         print(f"Projects: {len(cfg['projects'])}")
-    print(f"Ea compiler: {cfg['ea_compiler']}")
+    print(f"Ea compiler: {cfg['ea_compiler'] or '(not found — set $EA or put ea on PATH)'}")
     print()
     print("Common commands:")
     print("  eabrain index              # build index")
@@ -235,10 +256,12 @@ def cmd_status(args, cfg):
 
 
 def cmd_patterns(args, cfg):
-    ar_dir = cfg.get("autoresearch_dir", "/root/dev/eacompute/autoresearch/kernels")
-    if not os.path.isdir(ar_dir):
-        print(f"Autoresearch not found at {ar_dir}")
-        print("Set autoresearch_dir in ~/.eabrain/config.json")
+    ar_dir = cfg.get("autoresearch_dir")
+    if not ar_dir or not os.path.isdir(ar_dir):
+        shown = ar_dir or "(not resolved)"
+        print(f"Autoresearch not found at {shown}")
+        print("Set autoresearch_dir in ~/.eabrain/config.json, or EACOMPUTE_DIR env var, "
+              "or put ea on PATH so the location can be derived.")
         sys.exit(1)
 
     kernel_dirs = sorted(os.listdir(ar_dir))
