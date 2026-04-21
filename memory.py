@@ -46,6 +46,14 @@ class MemoryDB:
     def close(self):
         self.conn.close()
 
+    def _db_size_bytes(self) -> int:
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            p = self.path + suffix
+            if os.path.exists(p):
+                total += os.path.getsize(p)
+        return total
+
     def store_observation(
         self,
         project: str,
@@ -140,6 +148,9 @@ class MemoryDB:
         params.append(limit)
         sessions = self.conn.execute(sql, params).fetchall()
         result = []
+        # N+1 is intentional at this scale: sessions descend by started_at,
+        # observations ascend by created_at within each session — not expressible
+        # in a single JOIN without a subquery.
         for s in sessions:
             obs = self.conn.execute(
                 "SELECT * FROM observations WHERE session_id = ? ORDER BY created_at ASC",
@@ -157,7 +168,7 @@ class MemoryDB:
         last = self.conn.execute(
             "SELECT started_at FROM sessions ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
-        db_size = os.path.getsize(self.path) if os.path.exists(self.path) else 0
+        db_size = self._db_size_bytes()
         return {
             "observation_count": obs_count,
             "session_count": sess_count,
