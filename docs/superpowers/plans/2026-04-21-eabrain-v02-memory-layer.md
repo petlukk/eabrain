@@ -6,7 +6,7 @@
 
 **Architecture:** SQLite (`memory.db`) stores observations and sessions alongside the existing binary `index.bin` for kernels. The SIMD `fuzzy.ea` kernel powers search across both. A configurable preamble (principles + hard rules) is injected at session start. A single-file web viewer serves via Python's `http.server`.
 
-**Tech Stack:** Python 3 stdlib (sqlite3, http.server, uuid, hashlib, json), numpy (existing), Eä SIMD kernels (existing libfuzzy.so)
+**Tech Stack:** Python 3 stdlib (sqlite3, http.server, uuid, hashlib, json), numpy (existing), Eä SIMD kernels (libfuzzy.so, libscan.so, libscan_rust.so, NEW libsubstr.so)
 
 **Spec:** `docs/superpowers/specs/2026-04-21-eabrain-v02-design.md`
 
@@ -16,17 +16,563 @@
 
 | File | Status | Responsibility |
 |------|--------|----------------|
+| `kernels/substr.ea` | NEW | SIMD substring search kernel |
+| `kernels/substr.ea.json` | NEW | Kernel metadata |
+| `build_kernels.sh` | MODIFY | Add substr.ea compilation |
+| `indexer.py` | MODIFY | Replace Python `_byte_histogram()` with SIMD `byte_histogram_embed()` |
+| `eabrain.py` | MODIFY | Replace Python histogram in search with SIMD, add new CLI commands |
 | `memory.py` | NEW | SQLite schema, store/query/timeline operations |
 | `inject.py` | NEW | Preamble loading, dynamic context assembly, session lifecycle |
 | `sync.py` | NEW | Export/import/merge memory.db |
 | `server.py` | NEW | Web viewer: http.server + REST API |
 | `web/viewer.html` | NEW | Single-file web UI (HTML + CSS + JS) |
-| `eabrain.py` | MODIFY | Add new CLI commands, update search/remember/recall/status |
 | `tests/test_memory.py` | NEW | SQLite operations |
 | `tests/test_inject.py` | NEW | Injection + budget + session lifecycle |
 | `tests/test_sync.py` | NEW | Export/import/merge |
 | `tests/test_server.py` | NEW | API endpoints |
 | `tests/test_migrate.py` | NEW | v0.1 → v0.2 migration |
+| `tests/test_substr_kernel.py` | NEW | SIMD substring search kernel tests |
+
+---
+
+### Task 0A: Wire Up Existing SIMD Kernels (replace Python `_byte_histogram`)
+
+**Files:**
+- Modify: `indexer.py`
+- Modify: `eabrain.py`
+
+Currently `indexer.py:_byte_histogram()` (line 423) and `eabrain.py:cmd_search()` (lines 107-112) reimplement byte histogram computation in pure Python loops. The SIMD kernel `fuzzy.ea → byte_histogram_embed()` already does this — it's compiled, has bindings in `fuzzy.py`, but is never called. Same for `normalize_vectors()`.
+
+- [ ] **Step 1: Write a failing test that verifies SIMD histogram matches Python histogram**
+
+```python
+# tests/test_simd_histogram.py
+import os
+import numpy as np
+
+LIB_PATH = os.path.join(os.path.dirname(__file__), "..", "lib", "libfuzzy.so")
+
+def test_simd_histogram_matches_python():
+    """SIMD byte_histogram_embed must produce same result as the Python _byte_histogram."""
+    if not os.path.exists(LIB_PATH):
+        import pytest
+        pytest.skip("libfuzzy.so not built")
+
+    from indexer import _byte_histogram as python_hist
+    from indexer import _simd_byte_histogram as simd_hist
+
+    text = b"export func batch_cosine(query: *f32, vecs: *f32) { let acc: f32x8 = splat(0.0) }"
+    py_result = python_hist(text)
+    simd_result = simd_hist(text)
+    np.testing.assert_array_almost_equal(py_result, simd_result, decimal=5)
+
+def test_simd_histogram_empty():
+    if not os.path.exists(LIB_PATH):
+        import pytest
+        pytest.skip("libfuzzy.so not built")
+
+    from indexer import _simd_byte_histogram as simd_hist
+    result = simd_hist(b"")
+    assert result.shape == (256,)
+    assert np.sum(result) == 0.0
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /root/dev/eabrain && python3 -m pytest tests/test_simd_histogram.py -v`
+Expected: FAIL — `ImportError: cannot import name '_simd_byte_histogram'`
+
+- [ ] **Step 3: Add `_simd_byte_histogram` to indexer.py**
+
+Add after the existing `_byte_histogram` function in `indexer.py`:
+
+```python
+def _simd_byte_histogram(text_bytes: bytes) -> np.ndarray:
+    """Compute 256-dim byte histogram using SIMD kernel, then L2-normalize."""
+    hist = np.zeros(256, dtype=np.float32)
+    if len(text_bytes) == 0:
+        return hist
+    src = np.frombuffer(text_bytes, dtype=np.uint8)
+    lib = _load_lib("libfuzzy.so")
+    lib.byte_histogram_embed(
+        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(text_bytes)),
+        hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
+    # L2 normalize (using SIMD normalize_vectors for a single vector)
+    lib.normalize_vectors(
+        hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        ctypes.c_int32(256),
+        ctypes.c_int32(1),
+    )
+    return hist
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /root/dev/eabrain && python3 -m pytest tests/test_simd_histogram.py -v`
+Expected: 2 tests PASS
+
+- [ ] **Step 5: Replace all Python histogram calls with SIMD**
+
+In `indexer.py`, replace the call at line 673:
+```python
+# OLD:
+emb = _byte_histogram(src_bytes)
+# NEW:
+try:
+    emb = _simd_byte_histogram(src_bytes)
+except OSError:
+    emb = _byte_histogram(src_bytes)
+```
+
+In `eabrain.py`, replace the Python histogram in `cmd_search` (lines 106-112):
+```python
+# OLD:
+query_bytes = query.encode("utf-8")
+hist = np.zeros(256, dtype=np.float32)
+for b in query_bytes:
+    hist[b] += 1.0
+norm_val = float(np.linalg.norm(hist))
+if norm_val > 0:
+    hist /= norm_val
+# NEW:
+from indexer import _simd_byte_histogram
+hist = _simd_byte_histogram(query.encode("utf-8"))
+norm_val = float(np.linalg.norm(hist))
+```
+
+- [ ] **Step 6: Run full test suite to verify no regressions**
+
+Run: `cd /root/dev/eabrain && python3 -m pytest tests/ -v`
+Expected: all tests PASS
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /root/dev/eabrain
+git add indexer.py eabrain.py tests/test_simd_histogram.py
+git commit -m "perf: replace Python byte histogram with SIMD byte_histogram_embed + normalize_vectors"
+```
+
+---
+
+### Task 0B: SIMD Substring Search Kernel (`kernels/substr.ea`)
+
+**Files:**
+- Create: `kernels/substr.ea`
+- Create: `kernels/substr.ea.json`
+- Test: `tests/test_substr_kernel.py`
+
+New kernel: generalized SIMD substring search. Follows the same pattern as `scan.ea` (SIMD scan for first byte, scalar verify rest) and `scan_rust.ea` (find_arrow_pairs). Returns byte offsets of all matches.
+
+- [ ] **Step 1: Write failing tests for the kernel**
+
+```python
+# tests/test_substr_kernel.py
+import ctypes
+import os
+import numpy as np
+import pytest
+
+LIB_PATH = os.path.join(os.path.dirname(__file__), "..", "lib", "libsubstr.so")
+
+@pytest.fixture
+def lib():
+    if not os.path.exists(LIB_PATH):
+        pytest.skip("libsubstr.so not built")
+    lib = ctypes.CDLL(LIB_PATH)
+    lib.substr_search.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),  # haystack
+        ctypes.c_int32,                   # haystack_len
+        ctypes.POINTER(ctypes.c_uint8),  # needle
+        ctypes.c_int32,                   # needle_len
+        ctypes.POINTER(ctypes.c_int32),  # out_offsets
+        ctypes.c_int32,                   # out_max
+        ctypes.POINTER(ctypes.c_int32),  # out_count
+    ]
+    lib.substr_search.restype = None
+    return lib
+
+def test_find_single_match(lib):
+    haystack = b"hello world SQLite is great"
+    needle = b"SQLite"
+    hay = np.frombuffer(haystack, dtype=np.uint8)
+    ndl = np.frombuffer(needle, dtype=np.uint8)
+    offsets = np.zeros(64, dtype=np.int32)
+    count = np.zeros(1, dtype=np.int32)
+    lib.substr_search(
+        hay.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(haystack)),
+        ndl.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(needle)),
+        offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        ctypes.c_int32(64),
+        count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+    assert int(count[0]) == 1
+    assert int(offsets[0]) == 12  # "SQLite" starts at byte 12
+
+def test_find_multiple_matches(lib):
+    haystack = b"abc abc abc"
+    needle = b"abc"
+    hay = np.frombuffer(haystack, dtype=np.uint8)
+    ndl = np.frombuffer(needle, dtype=np.uint8)
+    offsets = np.zeros(64, dtype=np.int32)
+    count = np.zeros(1, dtype=np.int32)
+    lib.substr_search(
+        hay.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(haystack)),
+        ndl.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(needle)),
+        offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        ctypes.c_int32(64),
+        count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+    assert int(count[0]) == 3
+    assert int(offsets[0]) == 0
+    assert int(offsets[1]) == 4
+    assert int(offsets[2]) == 8
+
+def test_no_match(lib):
+    haystack = b"hello world"
+    needle = b"xyz"
+    hay = np.frombuffer(haystack, dtype=np.uint8)
+    ndl = np.frombuffer(needle, dtype=np.uint8)
+    offsets = np.zeros(64, dtype=np.int32)
+    count = np.zeros(1, dtype=np.int32)
+    lib.substr_search(
+        hay.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(haystack)),
+        ndl.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(needle)),
+        offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        ctypes.c_int32(64),
+        count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+    assert int(count[0]) == 0
+
+def test_caps_at_out_max(lib):
+    haystack = b"aaa"
+    needle = b"a"
+    hay = np.frombuffer(haystack, dtype=np.uint8)
+    ndl = np.frombuffer(needle, dtype=np.uint8)
+    offsets = np.zeros(2, dtype=np.int32)
+    count = np.zeros(1, dtype=np.int32)
+    lib.substr_search(
+        hay.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(haystack)),
+        ndl.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(needle)),
+        offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        ctypes.c_int32(2),
+        count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+    assert int(count[0]) == 2
+
+def test_long_haystack(lib):
+    """Test with haystack > 16 bytes to exercise SIMD path."""
+    haystack = b"x" * 100 + b"NEEDLE" + b"x" * 100 + b"NEEDLE" + b"x" * 50
+    needle = b"NEEDLE"
+    hay = np.frombuffer(haystack, dtype=np.uint8)
+    ndl = np.frombuffer(needle, dtype=np.uint8)
+    offsets = np.zeros(64, dtype=np.int32)
+    count = np.zeros(1, dtype=np.int32)
+    lib.substr_search(
+        hay.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(haystack)),
+        ndl.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(needle)),
+        offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        ctypes.c_int32(64),
+        count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+    assert int(count[0]) == 2
+    assert int(offsets[0]) == 100
+    assert int(offsets[1]) == 206
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd /root/dev/eabrain && python3 -m pytest tests/test_substr_kernel.py -v`
+Expected: SKIP or FAIL — `libsubstr.so not built`
+
+- [ ] **Step 3: Write the SIMD kernel**
+
+```
+// kernels/substr.ea — SIMD substring search.
+//
+// Generalized version of the scan.ea pattern. Uses u8x16 to scan for
+// the first byte of the needle in 16-byte windows, then scalar-verifies
+// the remaining needle bytes at each candidate position.
+//
+// Signature: substr_search(haystack, haystack_len, needle, needle_len,
+//            out_offsets, out_max, out_count)
+
+export func substr_search(
+    haystack: *u8,
+    haystack_len: i32,
+    needle: *u8,
+    needle_len: i32,
+    out_offsets: *mut i32,
+    out_max: i32,
+    out_count: *mut i32
+) {
+    let first_byte: i32 = to_i32(needle[0])
+    let first_splat: u8x16 = splat(to_u8(first_byte))
+    let ones: u8x16 = splat(1)
+    let zeros: u8x16 = splat(0)
+    let mut count: i32 = 0
+    let mut i: i32 = 0
+
+    // SIMD scan: 16 bytes at a time, look for first byte of needle
+    while i + 16 <= haystack_len {
+        let chunk: u8x16 = load(haystack, i)
+        let cmp: u8x16 = select(chunk .== first_splat, ones, zeros)
+        let hits: i32 = to_i32(reduce_add(cmp))
+        if hits > 0 {
+            let mut j: i32 = 0
+            while j < 16 {
+                let pos: i32 = i + j
+                if pos + needle_len <= haystack_len {
+                    if to_i32(haystack[pos]) == first_byte {
+                        // Scalar verify remaining bytes
+                        let mut match: i32 = 1
+                        let mut k: i32 = 1
+                        while k < needle_len {
+                            if to_i32(haystack[pos + k]) != to_i32(needle[k]) {
+                                match = 0
+                                k = needle_len
+                            }
+                            k = k + 1
+                        }
+                        if match == 1 {
+                            if count < out_max {
+                                out_offsets[count] = pos
+                                count = count + 1
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 16
+    }
+
+    // Scalar tail
+    while i + needle_len <= haystack_len {
+        if to_i32(haystack[i]) == first_byte {
+            let mut match: i32 = 1
+            let mut k: i32 = 1
+            while k < needle_len {
+                if to_i32(haystack[i + k]) != to_i32(needle[k]) {
+                    match = 0
+                    k = needle_len
+                }
+                k = k + 1
+            }
+            if match == 1 {
+                if count < out_max {
+                    out_offsets[count] = i
+                    count = count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    out_count[0] = count
+}
+```
+
+Create `kernels/substr.ea.json`:
+```json
+{
+    "name": "substr",
+    "description": "SIMD substring search — find all occurrences of needle in haystack",
+    "exports": ["substr_search"],
+    "arch": ["x86_64", "aarch64"]
+}
+```
+
+- [ ] **Step 4: Add substr.ea to build_kernels.sh**
+
+Append to `build_kernels.sh` (following the existing pattern):
+
+```bash
+echo "Compiling substr.ea..."
+$EA kernels/substr.ea --lib -o lib/libsubstr.so
+$EA bind --python kernels/substr.ea -o lib/_substr_bind.py
+```
+
+- [ ] **Step 5: Build the kernel**
+
+```bash
+cd /root/dev/eabrain && ./build_kernels.sh
+```
+
+Expected: `lib/libsubstr.so` created
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `cd /root/dev/eabrain && python3 -m pytest tests/test_substr_kernel.py -v`
+Expected: 6 tests PASS
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /root/dev/eabrain
+git add kernels/substr.ea kernels/substr.ea.json build_kernels.sh tests/test_substr_kernel.py
+git commit -m "feat: SIMD substring search kernel — generalized scan.ea pattern"
+```
+
+---
+
+### Task 0C: Python Bindings for substr.ea + Wire Into Memory Search
+
+**Files:**
+- Create: `substr.py` (Python bindings)
+- Modify: `memory.py` (use SIMD search for text queries)
+
+- [ ] **Step 1: Write failing test for SIMD-powered observation search**
+
+```python
+# tests/test_simd_search.py
+import os
+import tempfile
+import numpy as np
+from memory import MemoryDB
+
+LIB_PATH = os.path.join(os.path.dirname(__file__), "..", "lib", "libsubstr.so")
+
+def test_simd_text_search():
+    """Verify memory search uses SIMD when available."""
+    if not os.path.exists(LIB_PATH):
+        import pytest
+        pytest.skip("libsubstr.so not built")
+
+    with tempfile.TemporaryDirectory() as d:
+        db = MemoryDB(os.path.join(d, "memory.db"))
+        db.store_observation(project="a", obs_type="decision", content="chose SQLite for variable-length storage", session_id=None)
+        db.store_observation(project="a", obs_type="bug", content="off-by-one in scan loop", session_id=None)
+        db.store_observation(project="a", obs_type="note", content="SIMD search is fast", session_id=None)
+        results = db.simd_search("SQLite")
+        assert len(results) == 1
+        assert "SQLite" in results[0]["content"]
+        db.close()
+
+def test_simd_text_search_multiple_hits():
+    if not os.path.exists(LIB_PATH):
+        import pytest
+        pytest.skip("libsubstr.so not built")
+
+    with tempfile.TemporaryDirectory() as d:
+        db = MemoryDB(os.path.join(d, "memory.db"))
+        db.store_observation(project="a", obs_type="note", content="SIMD kernel compiled", session_id=None)
+        db.store_observation(project="a", obs_type="note", content="SIMD search works", session_id=None)
+        db.store_observation(project="a", obs_type="note", content="Python is slow", session_id=None)
+        results = db.simd_search("SIMD")
+        assert len(results) == 2
+        db.close()
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd /root/dev/eabrain && python3 -m pytest tests/test_simd_search.py -v`
+Expected: FAIL — `AttributeError: 'MemoryDB' object has no attribute 'simd_search'`
+
+- [ ] **Step 3: Create Python bindings for substr.ea**
+
+```python
+# substr.py
+"""substr — Python bindings for libsubstr.so SIMD substring search."""
+
+import ctypes
+import os
+import numpy as np
+
+_LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+
+
+def _load_lib():
+    lib = ctypes.CDLL(os.path.join(_LIB_DIR, "libsubstr.so"))
+    lib.substr_search.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    lib.substr_search.restype = None
+    return lib
+
+
+def substr_search(haystack: bytes, needle: bytes, max_results: int = 256) -> list:
+    """Find all byte offsets of needle in haystack using SIMD kernel."""
+    if not needle or not haystack:
+        return []
+    lib = _load_lib()
+    hay = np.frombuffer(haystack, dtype=np.uint8)
+    ndl = np.frombuffer(needle, dtype=np.uint8)
+    offsets = np.zeros(max_results, dtype=np.int32)
+    count = np.zeros(1, dtype=np.int32)
+    lib.substr_search(
+        hay.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(haystack)),
+        ndl.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int32(len(needle)),
+        offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        ctypes.c_int32(max_results),
+        count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+    )
+    return offsets[:int(count[0])].tolist()
+```
+
+- [ ] **Step 4: Add `simd_search` method to MemoryDB in memory.py**
+
+```python
+    def simd_search(self, text: str, project: str = None, limit: int = 20) -> list:
+        """Search observation content using SIMD substring kernel.
+        Falls back to SQL LIKE if libsubstr.so is not available."""
+        try:
+            from substr import substr_search
+        except (ImportError, OSError):
+            return self.query(text, project=project, limit=limit)
+
+        needle = text.encode("utf-8")
+        sql = "SELECT * FROM observations"
+        params = []
+        if project:
+            sql += " WHERE project = ?"
+            params.append(project)
+        rows = self.conn.execute(sql, params).fetchall()
+
+        matches = []
+        for row in rows:
+            content_bytes = row["content"].encode("utf-8")
+            hits = substr_search(content_bytes, needle)
+            if hits:
+                matches.append(dict(row))
+            if len(matches) >= limit:
+                break
+        return matches
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `cd /root/dev/eabrain && python3 -m pytest tests/test_simd_search.py -v`
+Expected: 2 tests PASS
+
+- [ ] **Step 6: Commit**
+
+```bash
+cd /root/dev/eabrain
+git add substr.py tests/test_simd_search.py memory.py
+git commit -m "feat: SIMD-powered observation text search via substr.ea kernel"
+```
 
 ---
 
@@ -1406,7 +1952,8 @@ In `cmd_search`, after the existing kernel search logic, add observation search.
                     for o in obs_results:
                         print(f"  [{o['type']}] {o['content'][:100]}")
         else:
-            obs_results = db.query(query, limit=5)
+            # SIMD substring search (falls back to SQL LIKE if libsubstr.so missing)
+            obs_results = db.simd_search(query, limit=5)
             if obs_results:
                 print(f"## Memory ({len(obs_results)} matches)\n")
                 for o in obs_results:
@@ -1758,7 +2305,8 @@ class EabrainHandler(BaseHTTPRequestHandler):
     def _api_search(self, params):
         db = self._get_db()
         q = params.get("q", [""])[0]
-        results = db.query(q, limit=20)
+        # SIMD substring search (falls back to SQL LIKE if libsubstr.so missing)
+        results = db.simd_search(q, limit=20)
         db.close()
         self._json_response({"observations": results})
 
