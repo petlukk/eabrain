@@ -6,6 +6,8 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
+import numpy as np
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -175,6 +177,19 @@ class MemoryDB:
             "last_session": last["started_at"] if last else None,
             "db_size_bytes": db_size,
         }
+
+    def load_embeddings(self, project: str = None) -> tuple:
+        sql = "SELECT id, embedding FROM observations WHERE embedding IS NOT NULL"
+        params = []
+        if project:
+            sql += " AND project = ?"
+            params.append(project)
+        rows = self.conn.execute(sql, params).fetchall()
+        if not rows:
+            return [], np.zeros((0, 256), dtype=np.float32)
+        ids = [r["id"] for r in rows]
+        vecs = [np.frombuffer(r["embedding"], dtype=np.float32) for r in rows]
+        return ids, np.stack(vecs, axis=0)
 
     def simd_search(self, text: str, project: str = None, limit: int = 20) -> list:
         """Search observation content using SIMD substring kernel.

@@ -121,3 +121,42 @@ def test_stats():
         assert s["session_count"] == 1
         assert s["last_session"] is not None
         db.close()
+
+def test_store_observation_with_embedding():
+    with tempfile.TemporaryDirectory() as d:
+        db = MemoryDB(os.path.join(d, "memory.db"))
+        emb = np.random.randn(256).astype(np.float32)
+        obs_id = db.store_observation(
+            project="eaclaw",
+            obs_type="note",
+            content="test embedding",
+            session_id=None,
+            embedding=emb.tobytes(),
+        )
+        results = db.query("embedding")
+        assert results[0]["embedding"] is not None
+        loaded = np.frombuffer(results[0]["embedding"], dtype=np.float32)
+        assert loaded.shape == (256,)
+        np.testing.assert_array_almost_equal(loaded, emb)
+        db.close()
+
+def test_load_all_embeddings():
+    with tempfile.TemporaryDirectory() as d:
+        db = MemoryDB(os.path.join(d, "memory.db"))
+        emb1 = np.random.randn(256).astype(np.float32)
+        emb2 = np.random.randn(256).astype(np.float32)
+        id1 = db.store_observation(project="a", obs_type="note", content="one", session_id=None, embedding=emb1.tobytes())
+        id2 = db.store_observation(project="a", obs_type="note", content="two", session_id=None, embedding=emb2.tobytes())
+        ids, matrix = db.load_embeddings()
+        assert len(ids) == 2
+        assert matrix.shape == (2, 256)
+        assert matrix.dtype == np.float32
+        db.close()
+
+def test_load_embeddings_empty():
+    with tempfile.TemporaryDirectory() as d:
+        db = MemoryDB(os.path.join(d, "memory.db"))
+        ids, matrix = db.load_embeddings()
+        assert len(ids) == 0
+        assert matrix.shape == (0, 256)
+        db.close()
