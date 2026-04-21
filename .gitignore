@@ -13,4 +13,5 @@ index.bin
 /fuzzy.py
 /scan.py
 /scan_rust.py
+/substr.py
 /kernels/*.ea.json

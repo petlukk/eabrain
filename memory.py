@@ -100,3 +100,31 @@ class MemoryDB:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def simd_search(self, text: str, project: str = None, limit: int = 20) -> list:
+        """Search observation content using SIMD substring kernel.
+
+        Falls back to SQL LIKE query if libsubstr.so is not available
+        (e.g., kernel not built on this machine).
+        """
+        try:
+            from text_search import find_offsets
+        except (ImportError, OSError):
+            return self.query(text, project=project, limit=limit)
+
+        needle = text.encode("utf-8")
+        sql = "SELECT * FROM observations"
+        params = []
+        if project:
+            sql += " WHERE project = ?"
+            params.append(project)
+        rows = self.conn.execute(sql, params).fetchall()
+
+        matches = []
+        for row in rows:
+            content_bytes = row["content"].encode("utf-8")
+            if find_offsets(content_bytes, needle):
+                matches.append(dict(row))
+            if len(matches) >= limit:
+                break
+        return matches
