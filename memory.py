@@ -101,6 +101,70 @@ class MemoryDB:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def create_session(self, project: str) -> str:
+        sid = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "INSERT INTO sessions (id, project, started_at) VALUES (?, ?, ?)",
+            (sid, project, now),
+        )
+        self.conn.commit()
+        return sid
+
+    def close_session(self, session_id: str, summary: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE sessions SET ended_at = ?, summary = ? WHERE id = ?",
+            (now, summary, session_id),
+        )
+        self.conn.commit()
+
+    def mark_incomplete(self, session_id: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE sessions SET ended_at = ?, summary = ? WHERE id = ? AND ended_at IS NULL",
+            (now, "[incomplete]", session_id),
+        )
+        self.conn.commit()
+
+    def timeline(self, project: str = None, limit: int = 20, since: str = None) -> list:
+        sql = "SELECT * FROM sessions WHERE 1=1"
+        params = []
+        if project:
+            sql += " AND project = ?"
+            params.append(project)
+        if since:
+            sql += " AND started_at >= ?"
+            params.append(since)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+        sessions = self.conn.execute(sql, params).fetchall()
+        result = []
+        for s in sessions:
+            obs = self.conn.execute(
+                "SELECT * FROM observations WHERE session_id = ? ORDER BY created_at ASC",
+                (s["id"],),
+            ).fetchall()
+            result.append({
+                "session": dict(s),
+                "observations": [dict(o) for o in obs],
+            })
+        return result
+
+    def stats(self) -> dict:
+        obs_count = self.conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+        sess_count = self.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        last = self.conn.execute(
+            "SELECT started_at FROM sessions ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        db_size = os.path.getsize(self.path) if os.path.exists(self.path) else 0
+        return {
+            "observation_count": obs_count,
+            "session_count": sess_count,
+            "last_session": last["started_at"] if last else None,
+            "db_size_bytes": db_size,
+        }
+
     def simd_search(self, text: str, project: str = None, limit: int = 20) -> list:
         """Search observation content using SIMD substring kernel.
 
