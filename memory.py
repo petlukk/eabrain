@@ -118,6 +118,7 @@ class MemoryDB:
         if project:
             sql += " WHERE project = ?"
             params.append(project)
+        sql += " ORDER BY created_at DESC"
         rows = self.conn.execute(sql, params).fetchall()
 
         matches = []
