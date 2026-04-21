@@ -125,7 +125,6 @@ def cmd_search(args, cfg):
         fuzzy_lib = _load_lib("libfuzzy.so")
         from indexer import _simd_byte_histogram
         hist = _simd_byte_histogram(query.encode("utf-8"))
-        norm_val = float(np.linalg.norm(hist))
 
         emb = idx["embeddings"]
         n = len(kernels)
@@ -135,7 +134,7 @@ def cmd_search(args, cfg):
             scores = np.zeros(n, dtype=np.float32)
             fuzzy_lib.batch_cosine(
                 hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                ctypes.c_float(norm_val if norm_val > 0 else 1.0),
+                ctypes.c_float(1.0),
                 emb.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
                 ctypes.c_int32(256),
                 ctypes.c_int32(n),
