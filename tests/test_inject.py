@@ -79,7 +79,7 @@ def test_start_session_creates_file():
         session_file = os.path.join(d, "current_session")
         sid = start_session(db, project="eaclaw", session_file=session_file)
         assert os.path.exists(session_file)
-        with open(session_file) as f:
+        with open(session_file, encoding="utf-8") as f:
             assert f.read().strip() == sid
         db.close()
 

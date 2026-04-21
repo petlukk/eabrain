@@ -1,6 +1,7 @@
 """inject.py — Preamble loading and context injection for eabrain."""
 
 import os
+import uuid
 
 from memory import MemoryDB
 
@@ -74,17 +75,18 @@ def start_session(db: MemoryDB, project: str, session_file: str) -> str:
     if old_sid:
         db.mark_incomplete(old_sid)
 
-    sid = db.create_session(project=project)
+    sid = str(uuid.uuid4())
     os.makedirs(os.path.dirname(os.path.abspath(session_file)), exist_ok=True)
-    with open(session_file, "w") as f:
+    with open(session_file, "w", encoding="utf-8") as f:
         f.write(sid)
+    db.create_session(project=project, session_id=sid)
     return sid
 
 
 def get_current_session_id(session_file: str) -> str:
     if not os.path.exists(session_file):
         return None
-    with open(session_file, "r") as f:
+    with open(session_file, "r", encoding="utf-8") as f:
         return f.read().strip() or None
 
 

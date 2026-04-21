@@ -111,8 +111,8 @@ class MemoryDB:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def create_session(self, project: str) -> str:
-        sid = str(uuid.uuid4())
+    def create_session(self, project: str, session_id: str = None) -> str:
+        sid = session_id or str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "INSERT INTO sessions (id, project, started_at) VALUES (?, ?, ?)",
