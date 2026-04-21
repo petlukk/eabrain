@@ -3,7 +3,7 @@ import tempfile
 
 import numpy as np
 
-from inject import load_preamble, build_injection
+from inject import load_preamble, build_injection, start_session, get_current_session_id, end_session
 from memory import MemoryDB
 
 
@@ -70,4 +70,53 @@ def test_build_injection_respects_budget():
         output = build_injection(db=db, preamble_dir=os.path.join(d, "preamble"), project="eaclaw", budget=500)
         # Budget limits dynamic section — not all 50 observations fit
         assert output.count("observation number") < 50
+        db.close()
+
+
+def test_start_session_creates_file():
+    with tempfile.TemporaryDirectory() as d:
+        db = MemoryDB(os.path.join(d, "memory.db"))
+        session_file = os.path.join(d, "current_session")
+        sid = start_session(db, project="eaclaw", session_file=session_file)
+        assert os.path.exists(session_file)
+        with open(session_file) as f:
+            assert f.read().strip() == sid
+        db.close()
+
+
+def test_get_current_session_id():
+    with tempfile.TemporaryDirectory() as d:
+        db = MemoryDB(os.path.join(d, "memory.db"))
+        session_file = os.path.join(d, "current_session")
+        sid = start_session(db, project="eaclaw", session_file=session_file)
+        assert get_current_session_id(session_file) == sid
+        db.close()
+
+
+def test_get_current_session_id_missing():
+    assert get_current_session_id("/nonexistent/file") is None
+
+
+def test_start_session_marks_orphan_incomplete():
+    with tempfile.TemporaryDirectory() as d:
+        db = MemoryDB(os.path.join(d, "memory.db"))
+        session_file = os.path.join(d, "current_session")
+        old_sid = start_session(db, project="eaclaw", session_file=session_file)
+        new_sid = start_session(db, project="eaclaw", session_file=session_file)
+        assert new_sid != old_sid
+        row = db.conn.execute("SELECT * FROM sessions WHERE id = ?", (old_sid,)).fetchone()
+        assert row["summary"] == "[incomplete]"
+        db.close()
+
+
+def test_end_session_closes_and_removes_file():
+    with tempfile.TemporaryDirectory() as d:
+        db = MemoryDB(os.path.join(d, "memory.db"))
+        session_file = os.path.join(d, "current_session")
+        sid = start_session(db, project="eaclaw", session_file=session_file)
+        end_session(db, session_id=sid, summary="all done", session_file=session_file)
+        assert not os.path.exists(session_file)
+        row = db.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
+        assert row["summary"] == "all done"
+        assert row["ended_at"] is not None
         db.close()

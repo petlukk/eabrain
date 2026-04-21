@@ -66,3 +66,29 @@ def build_injection(
         sections.append("\n\n".join(dynamic_parts))
 
     return "\n\n".join(sections)
+
+
+def start_session(db: MemoryDB, project: str, session_file: str) -> str:
+    # Check for orphaned session
+    old_sid = get_current_session_id(session_file)
+    if old_sid:
+        db.mark_incomplete(old_sid)
+
+    sid = db.create_session(project=project)
+    os.makedirs(os.path.dirname(os.path.abspath(session_file)), exist_ok=True)
+    with open(session_file, "w") as f:
+        f.write(sid)
+    return sid
+
+
+def get_current_session_id(session_file: str) -> str:
+    if not os.path.exists(session_file):
+        return None
+    with open(session_file, "r") as f:
+        return f.read().strip() or None
+
+
+def end_session(db: MemoryDB, session_id: str, summary: str, session_file: str) -> None:
+    db.close_session(session_id, summary=summary)
+    if os.path.exists(session_file):
+        os.remove(session_file)
