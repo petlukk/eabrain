@@ -38,6 +38,18 @@ def _resolve_eacompute_dir(ea_compiler: str | None) -> str | None:
     return None
 
 
+def _default_projects() -> list:
+    """Default projects list: the parent directory of the eabrain install.
+    When eabrain is cloned into ~/Dev/eabrain, this returns ["~/Dev"], so
+    sibling projects are indexed automatically. Returns [] for site-packages
+    installs — those users must set `projects` in config.json explicitly."""
+    install_dir = os.path.dirname(os.path.abspath(__file__))
+    if "site-packages" in install_dir or "dist-packages" in install_dir:
+        return []
+    parent = os.path.dirname(install_dir)
+    return [parent] if parent and os.path.isdir(parent) else []
+
+
 def _load_config(env_path: str = None) -> dict:
     path = env_path or os.environ.get("EABRAIN_CONFIG") or os.path.expanduser("~/.eabrain/config.json")
     if os.path.exists(path):
@@ -45,7 +57,8 @@ def _load_config(env_path: str = None) -> dict:
             cfg = json.load(f)
     else:
         cfg = {}
-    cfg.setdefault("projects", [])
+    if "projects" not in cfg:
+        cfg["projects"] = _default_projects()
     cfg.setdefault("index_path", _DEFAULT_INDEX)
     cfg.setdefault("max_source_lines", 50)
     cfg.setdefault("max_session_entries", 100)

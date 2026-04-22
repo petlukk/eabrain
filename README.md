@@ -30,9 +30,17 @@ export EA=/path/to/eacompute/target/release/ea
 ./build_kernels.sh
 
 # 2. Install
+#    On Debian/Ubuntu 23.04+, plain `pip install` is blocked by PEP 668.
+#    Either: `pip install -e . --user --break-system-packages`
+#        or: `pipx install -e .`
+#        or: create a venv first (note: `eabrain` CLI lives inside it, so
+#            hooks that call `eabrain` only work when the venv is active).
 pip install -e .
 
-# 3. Configure
+# 3. (Optional) Configure
+#    By default, eabrain scans the parent directory of this clone — so if
+#    you cloned to ~/Dev/eabrain, sibling projects under ~/Dev/ are indexed
+#    automatically. Only create a config.json if you want to override:
 mkdir -p ~/.eabrain
 cat > ~/.eabrain/config.json <<'EOF'
 {
@@ -192,6 +200,10 @@ Add this to `~/.claude/settings.json` so Claude Code calls `inject` at session
 start and `store-summary` at session end automatically. Both hooks are
 best-effort: if `eabrain` isn't on PATH the session continues normally.
 
+The `SessionStart` envelope uses `python3` (always present since eabrain is
+a Python tool) rather than `jq`, which is not installed on many systems —
+using `jq` here means the hook silently no-ops whenever `jq` is missing.
+
 ```json
 {
   "hooks": {
@@ -200,7 +212,7 @@ best-effort: if `eabrain` isn't on PATH the session continues normally.
         "hooks": [
           {
             "type": "command",
-            "command": "out=$(eabrain inject --project \"${CLAUDE_PROJECT_DIR:-$PWD}\" 2>/dev/null) && jq -nc --arg ctx \"$out\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:$ctx}}' || true"
+            "command": "out=$(eabrain inject --project \"${CLAUDE_PROJECT_DIR:-$PWD}\" 2>/dev/null) && python3 -c 'import json,sys; print(json.dumps({\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":sys.argv[1]}}))' \"$out\" || true"
           }
         ]
       }
@@ -246,7 +258,7 @@ a settings file at launch).
 
 | Field | Default | Description |
 |---|---|---|
-| `projects` | `[]` | Directories to scan for `.ea` files |
+| `projects` | auto (parent dir of install) | Directories to scan for `.ea` files. If unset, defaults to the parent directory of wherever eabrain is cloned — so sibling repos are indexed automatically. Set to `[]` to disable auto-discovery. |
 | `index_path` | `~/.eabrain/index.bin` | Kernel index location |
 | `eabrain_dir` | `~/.eabrain` | Where memory.db, current_session, preamble/ live |
 | `max_source_lines` | 50 | Inline source for kernels shorter than this |

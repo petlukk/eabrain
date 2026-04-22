@@ -210,3 +210,25 @@ def test_sync_export_import(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "Exported" in captured.out
     assert "Imported" in captured.out
+
+
+def test_default_projects_auto_discovers_parent():
+    from eabrain import _default_projects
+    import eabrain as eabrain_mod
+    expected = os.path.dirname(os.path.dirname(os.path.abspath(eabrain_mod.__file__)))
+    assert _default_projects() == [expected]
+
+
+def test_load_config_missing_projects_triggers_auto_discovery(tmp_path):
+    from eabrain import _load_config, _default_projects
+    cfg_path = tmp_path / "no_such_config.json"
+    cfg = _load_config(str(cfg_path))
+    assert cfg["projects"] == _default_projects()
+
+
+def test_load_config_explicit_empty_projects_stays_empty(tmp_path):
+    from eabrain import _load_config
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"projects": []}))
+    cfg = _load_config(str(cfg_path))
+    assert cfg["projects"] == []
