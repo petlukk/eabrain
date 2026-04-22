@@ -3,7 +3,7 @@ import tempfile
 
 import numpy as np
 
-from inject import load_preamble, build_injection, start_session, get_current_session_id, end_session
+from inject import load_preamble, build_injection, start_session, get_current_session_id, end_session, ensure_preamble
 from memory import MemoryDB
 
 
@@ -120,3 +120,24 @@ def test_end_session_closes_and_removes_file():
         assert row["summary"] == "all done"
         assert row["ended_at"] is not None
         db.close()
+
+
+def test_ensure_preamble_creates_defaults():
+    with tempfile.TemporaryDirectory() as d:
+        preamble_dir = os.path.join(d, "preamble")
+        ensure_preamble(preamble_dir)
+        assert os.path.exists(os.path.join(preamble_dir, "01_principles.md"))
+        assert os.path.exists(os.path.join(preamble_dir, "02_hard_rules.md"))
+        with open(os.path.join(preamble_dir, "01_principles.md")) as f:
+            content = f.read()
+        assert "Think Before Coding" in content
+
+
+def test_ensure_preamble_does_not_overwrite():
+    with tempfile.TemporaryDirectory() as d:
+        preamble_dir = os.path.join(d, "preamble")
+        os.makedirs(preamble_dir)
+        with open(os.path.join(preamble_dir, "custom.md"), "w") as f:
+            f.write("My custom rule")
+        ensure_preamble(preamble_dir)
+        assert not os.path.exists(os.path.join(preamble_dir, "01_principles.md"))
