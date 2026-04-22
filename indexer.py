@@ -325,36 +325,42 @@ def _load_lib(name: str) -> ctypes.CDLL:
     return ctypes.CDLL(os.path.join(lib_dir, name))
 
 
+_U8_PTR = np.ctypeslib.ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS")
+_I32_PTR = np.ctypeslib.ndpointer(dtype=np.int32, flags="C_CONTIGUOUS")
+_F32_PTR = np.ctypeslib.ndpointer(dtype=np.float32, flags="C_CONTIGUOUS")
+
+
+def _bind_scan_lib(lib):
+    """Bind argtypes/restype on libscan.so functions. ndpointer argtypes let
+    ctypes manage the lifetime of the array reference for the duration of the
+    call — the bare `arr.ctypes.data_as(POINTER(...))` pattern leaves dangling
+    state that crashes Python 3.14 / numpy 2.4 GC."""
+    if getattr(lib, "_eabrain_bound", False):
+        return
+    lib.find_export_offsets.argtypes = [_U8_PTR, ctypes.c_int32, _I32_PTR, _I32_PTR]
+    lib.find_export_offsets.restype = None
+    lib.detect_simd_types.argtypes = [_U8_PTR, ctypes.c_int32, _I32_PTR]
+    lib.detect_simd_types.restype = None
+    lib.detect_intrinsics.argtypes = [_U8_PTR, ctypes.c_int32, _I32_PTR]
+    lib.detect_intrinsics.restype = None
+    lib._eabrain_bound = True
+
+
 def _scan_ea_file(src_bytes: bytes, scan_lib) -> list:
     """Scan a .ea file and return list of kernel dicts."""
+    _bind_scan_lib(scan_lib)
     src = np.frombuffer(src_bytes, dtype=np.uint8)
     n = len(src_bytes)
 
-    # Find export offsets
     offsets = np.zeros(256, dtype=np.int32)
     count = np.zeros(1, dtype=np.int32)
-    scan_lib.find_export_offsets(
-        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-        ctypes.c_int32(n),
-        offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
-        count.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
-    )
+    scan_lib.find_export_offsets(src, n, offsets, count)
 
-    # Detect SIMD types
     type_mask = np.zeros(1, dtype=np.int32)
-    scan_lib.detect_simd_types(
-        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-        ctypes.c_int32(n),
-        type_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
-    )
+    scan_lib.detect_simd_types(src, n, type_mask)
 
-    # Detect intrinsics
     intr_mask = np.zeros(1, dtype=np.int32)
-    scan_lib.detect_intrinsics(
-        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-        ctypes.c_int32(n),
-        intr_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
-    )
+    scan_lib.detect_intrinsics(src, n, intr_mask)
 
     tm = int(type_mask[0])
     if tm & 0b100:
@@ -431,24 +437,34 @@ def _byte_histogram(text_bytes: bytes) -> np.ndarray:
     return hist
 
 
+_FUZZY_LIB = None
+
+
+def _get_fuzzy_lib():
+    """Cache libfuzzy.so + bind argtypes once. Repeatedly opening the .so
+    via _load_lib leaves dozens of CDLL handles alive; combined with the
+    bare data_as() pattern this crashes Python 3.14 / numpy 2.4 GC.
+    ndpointer argtypes let ctypes manage array lifetime per call."""
+    global _FUZZY_LIB
+    if _FUZZY_LIB is None:
+        lib = _load_lib("libfuzzy.so")
+        lib.byte_histogram_embed.argtypes = [_U8_PTR, ctypes.c_int32, _F32_PTR]
+        lib.byte_histogram_embed.restype = None
+        lib.normalize_vectors.argtypes = [_F32_PTR, ctypes.c_int32, ctypes.c_int32]
+        lib.normalize_vectors.restype = None
+        _FUZZY_LIB = lib
+    return _FUZZY_LIB
+
+
 def _simd_byte_histogram(text_bytes: bytes) -> np.ndarray:
     """Compute 256-dim byte histogram using SIMD kernel, then L2-normalize."""
     hist = np.zeros(256, dtype=np.float32)
     if len(text_bytes) == 0:
         return hist
     src = np.frombuffer(text_bytes, dtype=np.uint8)
-    lib = _load_lib("libfuzzy.so")
-    lib.byte_histogram_embed(
-        src.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-        ctypes.c_int32(len(text_bytes)),
-        hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-    )
-    # L2 normalize (using SIMD normalize_vectors for a single vector)
-    lib.normalize_vectors(
-        hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-        ctypes.c_int32(256),
-        ctypes.c_int32(1),
-    )
+    lib = _get_fuzzy_lib()
+    lib.byte_histogram_embed(src, len(text_bytes), hist)
+    lib.normalize_vectors(hist, 256, 1)
     return hist
 
 
@@ -679,6 +695,14 @@ def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
     embeddings = []
     file_count = 0
 
+    # NB: _byte_histogram (pure Python) is used here instead of
+    # _simd_byte_histogram. The SIMD path goes through libfuzzy via ctypes,
+    # and on Python 3.14 + numpy 2.4 the per-call ctypes pointer objects
+    # accumulate garbage that crashes GC after ~50 invocations
+    # (Garbage-collecting / numpy._core._internal.data_as / ctypes.cast).
+    # Single-shot use (cmd_search, cmd_remember, cmd_store) is safe; only
+    # the bulk indexer loop hits the threshold. The Python loop is fast
+    # enough at this scale.
     for project_dir in project_dirs:
         project_dir = os.path.expanduser(project_dir)
         ea_files = glob.glob(os.path.join(project_dir, "**", "*.ea"), recursive=True)
@@ -691,10 +715,7 @@ def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
 
             file_count += 1
             file_kernels = _scan_ea_file(src_bytes, scan_lib)
-            try:
-                emb = _simd_byte_histogram(src_bytes)
-            except OSError:
-                emb = _byte_histogram(src_bytes)
+            emb = _byte_histogram(src_bytes)
 
             for k in file_kernels:
                 k["path"] = ea_path
