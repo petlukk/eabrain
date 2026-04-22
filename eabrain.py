@@ -49,6 +49,7 @@ def _load_config(env_path: str = None) -> dict:
     cfg.setdefault("index_path", _DEFAULT_INDEX)
     cfg.setdefault("max_source_lines", 50)
     cfg.setdefault("max_session_entries", 100)
+    cfg.setdefault("eabrain_dir", os.path.expanduser("~/.eabrain"))
 
     if "ea_compiler" not in cfg:
         cfg["ea_compiler"] = _resolve_ea_compiler()
@@ -405,6 +406,120 @@ def cmd_patterns(args, cfg):
             print()
 
 
+def _get_db(cfg):
+    from memory import MemoryDB
+    return MemoryDB(os.path.join(cfg["eabrain_dir"], "memory.db"))
+
+
+def _get_session_file(cfg):
+    return os.path.join(cfg["eabrain_dir"], "current_session")
+
+
+def _get_preamble_dir(cfg):
+    return os.path.join(cfg["eabrain_dir"], "preamble")
+
+
+def cmd_inject(args, cfg):
+    from inject import build_injection, start_session
+    db = _get_db(cfg)
+    project = getattr(args, "project", None) or os.getcwd()
+    budget = getattr(args, "budget", 2000) or 2000
+    start_session(db, project=project, session_file=_get_session_file(cfg))
+    output = build_injection(
+        db=db,
+        preamble_dir=_get_preamble_dir(cfg),
+        project=project,
+        budget=budget,
+    )
+    print(output)
+    db.close()
+
+
+def cmd_store(args, cfg):
+    from inject import get_current_session_id
+    from indexer import _simd_byte_histogram
+    db = _get_db(cfg)
+    sid = get_current_session_id(_get_session_file(cfg))
+    project = getattr(args, "project", None) or os.getcwd()
+    content = args.content
+    emb = _simd_byte_histogram(content.encode("utf-8"))
+    db.store_observation(
+        project=project,
+        obs_type=args.type,
+        content=content,
+        session_id=sid,
+        embedding=emb.tobytes(),
+    )
+    print(f"Stored [{args.type}]: {content[:80]}")
+    db.close()
+
+
+def cmd_store_summary(args, cfg):
+    from inject import get_current_session_id, end_session
+    db = _get_db(cfg)
+    session_file = _get_session_file(cfg)
+    sid = get_current_session_id(session_file)
+    if sid:
+        end_session(db, session_id=sid, summary=args.content, session_file=session_file)
+        print(f"Session closed: {args.content[:80]}")
+    else:
+        print("No active session.")
+    db.close()
+
+
+def cmd_timeline(args, cfg):
+    db = _get_db(cfg)
+    project = getattr(args, "project", None)
+    limit = getattr(args, "last", 10) or 10
+    since = getattr(args, "since", None)
+    tl = db.timeline(project=project, limit=limit, since=since)
+    if not tl:
+        print("No sessions recorded.")
+        db.close()
+        return
+    for entry in tl:
+        s = entry["session"]
+        obs = entry["observations"]
+        print(f"\n--- Session: {s['started_at'][:16]} [{s['project']}] ---")
+        if s.get("summary"):
+            print(f"Summary: {s['summary']}")
+        for o in obs:
+            print(f"  [{o['type']}] {o['content']}")
+    db.close()
+
+
+def cmd_migrate(args, cfg):
+    from memory import migrate_from_index
+    db = _get_db(cfg)
+    idx_path = cfg["index_path"]
+    if not os.path.exists(idx_path):
+        print("No index.bin found — nothing to migrate.")
+        db.close()
+        return
+    count = migrate_from_index(db, idx_path)
+    print(f"Migrated {count} session notes to memory.db")
+    db.close()
+
+
+def cmd_sync(args, cfg):
+    from sync import export_db, import_db
+    db_path = os.path.join(cfg["eabrain_dir"], "memory.db")
+    if args.export_path:
+        export_db(db_path, args.export_path)
+        print(f"Exported memory.db to {args.export_path}")
+    elif args.import_path:
+        import_db(db_path, args.import_path)
+        print(f"Imported and merged from {args.import_path}")
+    else:
+        print("Usage: eabrain sync --export <path> or --import <path>")
+
+
+def cmd_serve(args, cfg):
+    from server import serve
+    port = getattr(args, "port", 37777) or 37777
+    serve(cfg, port=port)
+
+
 def cmd_init(args, cfg):
     target_dir = args.project_dir or os.getcwd()
     claude_md = os.path.join(target_dir, "CLAUDE.md")
@@ -458,6 +573,33 @@ def main():
     p_init = sub.add_parser("init", help="Add eabrain snippet to CLAUDE.md")
     p_init.add_argument("--project-dir", help="Target project directory")
 
+    p_inject = sub.add_parser("inject", help="Inject context for session start")
+    p_inject.add_argument("--project", help="Project directory (default: cwd)")
+    p_inject.add_argument("--budget", type=int, default=2000, help="Token budget for dynamic section")
+
+    p_store = sub.add_parser("store", help="Store an observation")
+    p_store.add_argument("content")
+    p_store.add_argument("--type", required=True,
+                         choices=["decision", "bug", "architecture", "pattern", "error", "note"])
+    p_store.add_argument("--project", help="Project name (default: cwd)")
+
+    p_store_summary = sub.add_parser("store-summary", help="Store session summary and close session")
+    p_store_summary.add_argument("content")
+
+    p_timeline = sub.add_parser("timeline", help="Show session timeline")
+    p_timeline.add_argument("--project", help="Filter by project")
+    p_timeline.add_argument("--last", type=int, default=10, help="Number of sessions")
+    p_timeline.add_argument("--since", help="ISO date filter")
+
+    sub.add_parser("migrate", help="Migrate v0.1 notes to memory.db")
+
+    p_sync = sub.add_parser("sync", help="Export or import memory.db")
+    p_sync.add_argument("--export", dest="export_path", help="Export to path")
+    p_sync.add_argument("--import", dest="import_path", help="Import from path")
+
+    p_serve = sub.add_parser("serve", help="Start web viewer")
+    p_serve.add_argument("--port", type=int, default=37777, help="Port number")
+
     args = parser.parse_args()
     cfg = _load_config(args.config if hasattr(args, "config") else None)
 
@@ -470,6 +612,13 @@ def main():
         "status": cmd_status,
         "patterns": cmd_patterns,
         "init": cmd_init,
+        "inject": cmd_inject,
+        "store": cmd_store,
+        "store-summary": cmd_store_summary,
+        "timeline": cmd_timeline,
+        "migrate": cmd_migrate,
+        "sync": cmd_sync,
+        "serve": cmd_serve,
     }
 
     if args.command is None:
