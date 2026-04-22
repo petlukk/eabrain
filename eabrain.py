@@ -25,8 +25,9 @@ def _resolve_ea_compiler() -> str | None:
 
 
 def _resolve_eacompute_dir(ea_compiler: str | None) -> str | None:
-    """Locate eacompute source tree via $EACOMPUTE_DIR or derive from the ea
-    compiler's install path (.../eacompute/target/release/ea → .../eacompute)."""
+    """Locate eacompute source tree via $EACOMPUTE_DIR, derive from the ea
+    compiler's install path, or fall back to a sibling of the eabrain
+    install (.../Dev/eabrain → .../Dev/eacompute)."""
     env = os.environ.get("EACOMPUTE_DIR")
     if env and os.path.isdir(env):
         return env
@@ -35,6 +36,11 @@ def _resolve_eacompute_dir(ea_compiler: str | None) -> str | None:
         parent = os.path.dirname(os.path.dirname(os.path.dirname(ea_compiler)))
         if os.path.isdir(os.path.join(parent, "src")):
             return parent
+    install_dir = os.path.dirname(os.path.abspath(__file__))
+    if "site-packages" not in install_dir and "dist-packages" not in install_dir:
+        sibling = os.path.join(os.path.dirname(install_dir), "eacompute")
+        if os.path.isdir(os.path.join(sibling, "src")):
+            return sibling
     return None
 
 

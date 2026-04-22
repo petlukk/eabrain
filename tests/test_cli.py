@@ -232,3 +232,24 @@ def test_load_config_explicit_empty_projects_stays_empty(tmp_path):
     cfg_path.write_text(json.dumps({"projects": []}))
     cfg = _load_config(str(cfg_path))
     assert cfg["projects"] == []
+
+
+def test_resolve_eacompute_dir_sibling_fallback(tmp_path, monkeypatch):
+    import eabrain
+    dev = tmp_path / "Dev"
+    eabrain_dir = dev / "eabrain"
+    eacompute = dev / "eacompute"
+    eabrain_dir.mkdir(parents=True)
+    (eacompute / "src").mkdir(parents=True)
+    monkeypatch.setattr(eabrain, "__file__", str(eabrain_dir / "eabrain.py"))
+    monkeypatch.delenv("EACOMPUTE_DIR", raising=False)
+    assert eabrain._resolve_eacompute_dir(None) == str(eacompute)
+
+
+def test_resolve_eacompute_dir_no_sibling_returns_none(tmp_path, monkeypatch):
+    import eabrain
+    eabrain_dir = tmp_path / "Dev" / "eabrain"
+    eabrain_dir.mkdir(parents=True)
+    monkeypatch.setattr(eabrain, "__file__", str(eabrain_dir / "eabrain.py"))
+    monkeypatch.delenv("EACOMPUTE_DIR", raising=False)
+    assert eabrain._resolve_eacompute_dir(None) is None

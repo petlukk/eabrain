@@ -12,22 +12,20 @@ import tempfile
 import pytest
 
 from indexer import scrape_eacompute_intrinsics
+from eabrain import _resolve_eacompute_dir
 
 
-def _resolve_eacompute_dir() -> str | None:
-    env = os.environ.get("EACOMPUTE_DIR")
-    if env and os.path.isdir(env):
-        return env
+def _eacompute_with_typeck() -> str | None:
+    """Wraps eabrain._resolve_eacompute_dir and additionally requires
+    src/typeck/ to exist (this test needs the typeck sources to scrape)."""
     ea = shutil.which("ea") or os.environ.get("EA")
-    if ea and os.path.isfile(ea):
-        # .../eacompute/target/release/ea → .../eacompute
-        parent = os.path.dirname(os.path.dirname(os.path.dirname(ea)))
-        if os.path.isdir(os.path.join(parent, "src", "typeck")):
-            return parent
+    resolved = _resolve_eacompute_dir(ea if ea and os.path.isfile(ea) else None)
+    if resolved and os.path.isdir(os.path.join(resolved, "src", "typeck")):
+        return resolved
     return None
 
 
-EACOMPUTE_DIR = _resolve_eacompute_dir()
+EACOMPUTE_DIR = _eacompute_with_typeck()
 HAS_EACOMPUTE = EACOMPUTE_DIR is not None
 
 
