@@ -12,7 +12,7 @@ import time
 import numpy as np
 
 _DEFAULT_INDEX = os.path.expanduser("~/.eabrain/index.bin")
-_VERSION = "0.1.0"
+_VERSION = "0.2.0"
 _LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
 
 
