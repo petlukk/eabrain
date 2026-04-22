@@ -1,414 +1,230 @@
 # eabrain
 
-A context engine for AI coding assistants. It indexes all your [Ea](https://github.com/petlukk/eacompute) kernel files and gives your LLM instant access to function lookups, language reference, and session memory.
+A context engine + persistent memory layer for AI coding assistants. It indexes
+all your [Ea](https://github.com/petlukk/eacompute) kernel files for instant
+function lookups and language reference, and it gives Claude Code (or any AI)
+a SQLite-backed memory that survives across sessions.
 
-**The problem:** Every time you start a new Claude Code (or Cursor/Copilot) session, it forgets everything about your codebase. It re-scans files, re-discovers how the Ea compiler works, and repeats the same mistakes.
+**The problem:** Every new AI session forgets your codebase. It re-scans files,
+re-discovers how the Ea compiler works, and forgets what you decided last week.
 
-**The fix:** `eabrain` builds a searchable index of your code. Your AI runs `eabrain search` instead of grepping, `eabrain ref` instead of guessing, and `eabrain recall` to remember what you worked on last time.
+**The fix:** `eabrain` keeps two stores:
 
-Built with Ea SIMD kernels for fast search. Python for everything else.
+- **`index.bin`** — searchable index of every `.ea` kernel + Ea language reference
+- **`memory.db`** — SQLite of session journals, observations (decisions, bugs,
+  architecture notes) tagged by project and timestamp
+
+All searches go through SIMD kernels written in Ea (byte histograms, cosine
+similarity, substring matching). Python for everything else.
 
 ---
 
 ## Quick Start
 
-### 1. Clone it
-
 ```bash
 git clone git@github.com:petlukk/eabrain.git
 cd eabrain
-```
 
-### 2. Build the SIMD kernels
-
-You need the [Ea compiler](https://github.com/petlukk/eacompute) built first. Then:
-
-```bash
-# Point to your ea binary (default: /root/dev/eacompute/target/release/ea)
-export EA=/path/to/ea
-
+# 1. Build SIMD kernels (needs the Ea compiler — set $EA or put `ea` on PATH)
+export EA=/path/to/eacompute/target/release/ea
 ./build_kernels.sh
-```
 
-This compiles `fuzzy.ea` and `scan.ea` into shared libraries in `lib/`.
-
-### 3. Install
-
-```bash
+# 2. Install
 pip install -e .
-```
 
-Now `eabrain` is available as a CLI command.
-
-### 4. Tell it where your projects are
-
-Create `~/.eabrain/config.json`:
-
-```json
+# 3. Configure
+mkdir -p ~/.eabrain
+cat > ~/.eabrain/config.json <<'EOF'
 {
-    "projects": [
-        "/home/you/dev/my-ea-project",
-        "/home/you/dev/another-project"
-    ],
-    "index_path": "~/.eabrain/index.bin",
-    "max_source_lines": 50,
-    "max_session_entries": 100
+  "projects": ["/path/to/your/ea-project", "/path/to/another-project"]
 }
-```
+EOF
 
-Each path should be the root of a project that contains `.ea` files somewhere inside it.
-
-### 5. Build the index
-
-```bash
+# 4. Build the kernel index
 eabrain index
-```
 
-This scans all `.ea` files in your projects, extracts every exported function, detects SIMD types and intrinsics used, and writes a binary index to `~/.eabrain/index.bin`.
-
-### 6. Done
-
-```bash
+# 5. Check status
 eabrain status
 ```
+
+Configuration defaults: `index_path=~/.eabrain/index.bin`,
+`eabrain_dir=~/.eabrain`. The Ea compiler is resolved from `$EA`, then PATH.
+`$EACOMPUTE_DIR` overrides the source-tree location used by the intrinsic scraper.
 
 ---
 
 ## Commands
 
-### `eabrain index`
-
-Scans all `.ea` files across your configured projects and builds the binary index.
+### Kernel + reference search
 
 ```bash
-eabrain index
-
-# Override project list for a one-off scan:
-eabrain index --projects /path/to/project1,/path/to/project2
+eabrain index                       # rebuild the kernel index
+eabrain search <query>              # substring search across kernels and observations
+eabrain search <query> --fuzzy      # SIMD cosine similarity (byte histograms)
+eabrain search <query> --arch arm   # filter by architecture
+eabrain search <query> --kernels-only | --memory-only
+eabrain ref <name>                  # Ea language reference (intrinsics, types, flags)
+eabrain status                      # one-shot orientation
 ```
 
-Run this again after you've added or changed `.ea` files.
-
-### `eabrain search <query>`
-
-Find kernels by function name or file path.
+### Persistent memory (v0.2+)
 
 ```bash
-# Exact/substring match on function names and paths
-eabrain search "batch_cosine"
-
-# Filter by architecture
-eabrain search "batch" --arch arm
-eabrain search "batch" --arch x86
-
-# Fuzzy search (byte-histogram cosine similarity via SIMD)
-eabrain search --fuzzy "cosine similarity"
+eabrain inject                      # session start: print preamble + recent context
+eabrain remember <note>             # quick observation (type=note)
+eabrain store <text> --type {decision|bug|architecture|pattern|error|note}
+eabrain store-summary <text>        # session end: close current session with summary
+eabrain recall [--last N]           # show recent observations
+eabrain timeline [--project P] [--last N] [--since DATE]
+eabrain migrate                     # port v0.1 session notes from index.bin → memory.db
 ```
 
-Output includes the full source code for small kernels (under 50 lines), so your AI doesn't need a second round-trip to read the file.
-
-Example output:
+The session lifecycle is:
 
 ```
-# eabrain search: batch_cosine
-
-11 results (indexed 2m ago, 503 kernels)
-
-1. eaclaw/kernels/search.ea:73
-   export func batch_cosine(...)
-   arch: x86_64  simd: f32x8  lines: 36
-   [source: 36 lines]
-   export func batch_cosine(
-       query: *f32,
-       query_norm: f32,
-       ...
+inject (start)  →  remember/store (during)  →  store-summary (end)
 ```
 
-### `eabrain ref <name>`
+`inject` writes a session id to `~/.eabrain/current_session`; `store` and
+`remember` link observations to that session; `store-summary` closes it and
+removes the marker file. An orphaned session is auto-marked `[incomplete]`
+the next time `inject` runs.
 
-Look up Ea language reference: intrinsics, SIMD types, operators, compiler flags, and known gotchas.
+### Web viewer
 
 ```bash
-eabrain ref "reduce_add"
-eabrain ref "f32x8"
-eabrain ref "target-triple"
-eabrain ref "to_f32"
+eabrain serve [--port 37777]
 ```
 
-Example output:
+Single-file Catppuccin Mocha UI at `web/viewer.html`. Left panel: timeline of
+sessions; right panel: observation detail; top bar: search + project/type filters.
 
-```
-# eabrain ref: reduce_add
-
-Name: reduce_add
-Category: intrinsic
-Signature: reduce_add(v: f32xN) -> f32
-Description: Horizontal sum of all lanes in a SIMD vector
-```
-
-The reference includes ~50 entries covering:
-
-| Category | Examples |
-|---|---|
-| Intrinsics | `reduce_add`, `fma`, `splat`, `load`, `store`, `select`, `sqrt` |
-| Types | `f32x4`, `f32x8`, `f32x16`, `i32x4`, `u8x16` |
-| Operators | `.&`, `.\|`, `.^`, `.<<`, `.>>`, `.==`, `.>` |
-| Compiler flags | `--lib`, `--target-triple`, `--avx512`, `ea bind --python` |
-| Gotchas | float read pattern, no scalar bitwise, compiler path |
-
-### `eabrain remember <note>`
-
-Save a note to the session journal. These persist across sessions in the binary index.
+### Cross-machine sync
 
 ```bash
-eabrain remember "fixed the sign flip in layer 0 dequant kernel"
-eabrain remember "ported batch_cosine to AVX-512, lane ordering was wrong"
+eabrain sync --export /tmp/backup.db    # dump memory.db
+eabrain sync --import /tmp/backup.db    # merge by content hash, dedup safely
 ```
 
-### `eabrain recall`
+### Autoresearch patterns
 
-Show saved session notes.
+If you have the [eacompute](https://github.com/petlukk/eacompute) autoresearch
+suite locally, `eabrain patterns` browses proven optimization patterns:
 
 ```bash
-# Show all notes
-eabrain recall
-
-# Show last 5
-eabrain recall --last 5
+eabrain patterns                  # list all benchmarks
+eabrain patterns --what-works     # summary of winning strategies
+eabrain patterns matmul           # deep-dive: strategy space, history, best kernel
 ```
 
-### `eabrain status`
-
-Quick orientation. Run this at the start of every session.
-
-```bash
-eabrain status
-```
-
-```
-eabrain v0.1.0
-Index: ~/.eabrain/index.bin
-Last indexed: 2h ago
-Kernels: 503
-Refs: 51
-Projects: 6
-Session notes: 3
-```
-
-### `eabrain patterns`
-
-Browse autoresearch-proven optimization patterns. This connects to the [autoresearch](https://github.com/petlukk/eacompute) benchmark suite (28 kernel benchmarks with automated optimization loops).
-
-```bash
-# List all benchmarks with iteration counts and best times
-eabrain patterns
-
-# Summary of every winning optimization across all 28 benchmarks
-eabrain patterns --what-works
-
-# Deep dive into a specific kernel: strategy space, what worked,
-# what failed, and the full source of the best kernel found
-eabrain patterns matmul
-eabrain patterns dot_product
-eabrain patterns conv2d_3x3
-```
-
-Example `eabrain patterns matmul` output:
-
-```
-# eabrain patterns: matmul
-
-## Strategy Space
-Matrix multiply is compute-bound with O(n^3) ops on O(n^2) data.
-Loop order affects cache behavior dramatically...
-
-## History (5 iterations, 1 accepted)
-   1. [rejected]    n/a WRONG   Restructure loop order from ikj to ijk...
-   5. [ACCEPTED]  330us correct  Remove excessive prefetch calls...
-
-## What Worked
-  - Remove excessive prefetch calls + unroll k-loop to 8
-
-## What Failed
-  - [compile error] Restructure loop order from ikj to ijk...
-
-## Best Kernel (95 lines)
-export func matmul_f32(a: *f32, b: *f32, c: *mut f32, n: i32) {
-    ...
-}
-```
-
-This gives your AI everything it needs to write an optimized kernel: the strategy space, proven patterns, known dead ends, and a working reference implementation.
-
-**Configuration:** By default looks for autoresearch at `/root/dev/eacompute/autoresearch/kernels`. Override with `autoresearch_dir` in `~/.eabrain/config.json`.
+Override the location with `autoresearch_dir` in config or `$EACOMPUTE_DIR`.
 
 ### `eabrain init`
 
-Generate a CLAUDE.md snippet (or append to an existing one) that tells your AI assistant how to use eabrain.
-
-```bash
-# Add instructions to a project's CLAUDE.md
-eabrain init --project-dir /path/to/my-project
-
-# Current directory
-eabrain init
-```
-
-This appends something like:
-
-```markdown
-## eabrain
-Use `eabrain search <query>` to find Ea kernels across all projects.
-Use `eabrain ref <name>` to look up Ea language reference.
-Use `eabrain remember <note>` to save context between sessions.
-```
+Appends a one-paragraph eabrain snippet to a project's `CLAUDE.md` so the AI
+knows the commands are available.
 
 ---
 
-## How It Works
-
-### Architecture
+## Architecture
 
 ```
-eabrain.py          CLI (argparse, ~300 lines)
-indexer.py          Binary index format + builder (~480 lines)
-kernels/fuzzy.ea    SIMD cosine search (batch_cosine, normalize, byte_histogram)
-kernels/scan.ea     SIMD source parser (find exports, detect types/intrinsics)
+eabrain.py          CLI (argparse + ctypes dispatch)
+indexer.py          Kernel index format + builder (writes index.bin)
+memory.py           SQLite storage (sessions, observations, embeddings)
+inject.py           Preamble loader + session lifecycle
+sync.py             Export/import memory.db with hash dedup
+server.py           stdlib http.server, REST API for the viewer
+web/viewer.html     Single-file frontend (no deps)
+kernels/*.ea        Pure SIMD kernels — fuzzy, scan, scan_rust, substr
 reference/          Pre-baked Ea language reference (JSON)
-lib/                Compiled .so files (not in git, built by build_kernels.sh)
-~/.eabrain/         Config + binary index (shared across all projects)
+lib/                Compiled .so files + Python bindings (built, not in git)
+~/.eabrain/         Config, index.bin, memory.db, current_session, preamble/
 ```
 
-### The Binary Index (`index.bin`)
+### The two stores
 
-A flat binary file with four sections:
+**`index.bin`** is a flat binary file with a fixed-width header and four sections:
+kernel records, ref entries, session journal (legacy v0.1, kept for migration),
+and 256-dim byte-histogram embeddings (64-byte aligned for SIMD).
 
-1. **Header** (64 bytes) -- magic, version, counts, section offsets
-2. **Kernel records** (256 bytes each, fixed-width) -- path, function name, arch, SIMD width, line numbers, intrinsics bitmask
-3. **Reference entries** (512 bytes each, fixed-width) -- name, category, signature, description
-4. **Session journal** (variable-length) -- timestamped text notes
-5. **Embeddings** (256 x f32 per kernel, 64-byte aligned) -- byte-histogram vectors for fuzzy search
+**`memory.db`** is SQLite with two tables:
 
-Fixed-width records let the SIMD kernels stride through at known offsets without parsing.
+- `sessions(id, project, started_at, ended_at, summary)`
+- `observations(id, session_id, project, type, content, content_hash, embedding, created_at)`
 
-### The Ea Kernels
+Content hashing makes `eabrain sync --import` idempotent across machines.
+Embeddings are stored alongside observations so SIMD cosine search runs against
+your memory the same way it runs against kernels.
 
-**`fuzzy.ea`** -- Adapted from [eaclaw](https://github.com/petlukk/eaclaw)'s battle-tested vector search:
-- `byte_histogram_embed` -- count byte frequencies into a 256-dim vector
-- `normalize_vectors` -- in-place L2 normalization (f32x8 on x86, f32x4 on ARM)
-- `batch_cosine` -- cosine similarity of query against all stored embeddings
+### Ea kernels
 
-**`scan.ea`** -- SIMD source code parser:
-- `count_exports` / `find_export_offsets` -- find `export func` declarations using u8x16 byte scanning
-- `detect_simd_types` -- scan for `f32x4`, `f32x8`, `f32x16`, `i32x4`, `u8x16` usage
-- `detect_intrinsics` -- scan for `reduce_add`, `fma`, `splat`, `load`, `store`, `select`, `sqrt` usage
+- **`fuzzy.ea`** — `byte_histogram_embed`, `normalize_vectors`, `batch_cosine`
+- **`scan.ea`** — `count_exports`, `find_export_offsets`, `detect_simd_types`, `detect_intrinsics`
+- **`scan_rust.ea`** — SIMD byte-pair search for the Ea intrinsic scraper
+- **`substr.ea`** — generalized SIMD substring search powering `text_search` over observations
 
-All kernels are pure SIMD with scalar tails for alignment. No scalar-only code paths.
+All kernels are pure SIMD with scalar tails for alignment. No scalar-only paths.
 
 ---
 
 ## For AI Assistants
 
-If you're Claude Code (or another AI) reading this, here's how to use eabrain:
+If you're Claude Code (or another AI) reading this:
 
-1. **Start of session:** Run `eabrain status` to orient yourself
-2. **Looking for a kernel:** Run `eabrain search "name"` before grepping manually
-3. **Ea syntax question:** Run `eabrain ref "intrinsic_name"` instead of guessing
-4. **Cross-compile question:** Run `eabrain ref "target-triple"`
-5. **Writing a new kernel:** Run `eabrain patterns "kernel_type"` to see proven optimization patterns
-6. **Optimization guidance:** Run `eabrain patterns --what-works` for all winning strategies
-7. **End of session:** Run `eabrain remember "what we worked on"` to save context
-8. **After editing .ea files:** Run `eabrain index` to refresh the index
+1. **Session start:** `eabrain inject --project $(pwd)` — emits the preamble
+   (principles + hard rules from `~/.eabrain/preamble/`) plus recent context
+   for this project, and creates a session
+2. **During work:**
+   - `eabrain search "name"` before grepping
+   - `eabrain ref "intrinsic"` before guessing Ea syntax
+   - `eabrain patterns "kernel_type"` before designing a new kernel
+   - `eabrain store "decided X because Y" --type decision` to record load-bearing context
+3. **Session end:** `eabrain store-summary "what we shipped today"` — closes the
+   session and removes the `current_session` marker
+4. **After editing .ea files:** `eabrain index`
+
+Use `eabrain timeline --last 10` to recall what happened across recent sessions.
 
 ---
 
 ## Configuration
 
-### Config file: `~/.eabrain/config.json`
+`~/.eabrain/config.json`:
 
 ```json
 {
-    "projects": [
-        "/root/dev/eacompute",
-        "/root/dev/eakv",
-        "/root/dev/eaclaw",
-        "/root/dev/olorin",
-        "/root/dev/Cougar",
-        "/root/dev/eachacha"
-    ],
-    "index_path": "~/.eabrain/index.bin",
-    "max_source_lines": 50,
-    "max_session_entries": 100
+  "projects": ["/path/to/project1", "/path/to/project2"],
+  "index_path": "~/.eabrain/index.bin",
+  "eabrain_dir": "~/.eabrain",
+  "max_source_lines": 50,
+  "max_session_entries": 100
 }
 ```
 
 | Field | Default | Description |
 |---|---|---|
-| `projects` | (built-in list) | Directories to scan for `.ea` files |
-| `index_path` | `~/.eabrain/index.bin` | Where to write the binary index |
-| `max_source_lines` | 50 | Include full source in search results for kernels shorter than this |
-| `max_session_entries` | 100 | Max session notes before oldest are dropped |
+| `projects` | `[]` | Directories to scan for `.ea` files |
+| `index_path` | `~/.eabrain/index.bin` | Kernel index location |
+| `eabrain_dir` | `~/.eabrain` | Where memory.db, current_session, preamble/ live |
+| `max_source_lines` | 50 | Inline source for kernels shorter than this |
+| `max_session_entries` | 100 | (legacy) max v0.1 session notes |
 
-### Environment variable
-
-Set `EABRAIN_CONFIG` to point to an alternative config file:
-
-```bash
-EABRAIN_CONFIG=/tmp/test-config.json eabrain index
-```
+`EABRAIN_CONFIG=/tmp/test-config.json eabrain ...` overrides the config path.
 
 ---
 
 ## Development
 
-### Prerequisites
-
-- Python 3.10+
-- numpy
-- [Ea compiler](https://github.com/petlukk/eacompute) (built from source)
-
-### Build
-
 ```bash
-./build_kernels.sh      # compile Ea kernels to .so
-pip install -e ".[dev]" # install with dev deps (pytest)
+./build_kernels.sh              # compile Ea kernels to .so
+pip install -e ".[dev]"         # install with pytest
+python3 -m pytest tests/ -v     # 83 tests
 ```
 
-### Test
-
-```bash
-python3 -m pytest tests/ -v
-```
-
-30 tests covering: kernel compilation and correctness, binary format roundtrips, index building against real project data, CLI integration.
-
-### Project structure
-
-```
-eabrain/
-  kernels/
-    fuzzy.ea            SIMD cosine search kernel
-    scan.ea             SIMD source parser kernel
-  reference/
-    ea_reference.json   Ea language reference (51 entries)
-  tests/
-    test_fuzzy_kernel.py
-    test_scan_kernel.py
-    test_index_format.py
-    test_indexer.py
-    test_reference.py
-    test_cli.py
-  lib/                  (built, not in git)
-    libfuzzy.so
-    libscan.so
-  eabrain.py            CLI entry point
-  indexer.py            Binary format + index builder
-  build_kernels.sh      Kernel build script
-  setup.py              Package config
-  CLAUDE.md             Instructions for AI assistants
-```
-
----
+Test coverage spans kernel correctness, binary format roundtrips, indexer
+behavior on real project trees, the SQLite memory layer, the inject/session
+lifecycle, sync export/import dedup, the REST API, and end-to-end CLI flows.
 
 ## License
 
