@@ -76,6 +76,25 @@ Apply these rules to ALL code:
 5. **Delete, don't comment.** Dead code gets removed, not commented out.
 """
 
+_DEFAULT_COMMANDS = """\
+## eabrain CLI
+
+`eabrain` is a persistent memory + Eä-kernel search tool. The SessionStart hook already runs `eabrain inject`; SessionEnd runs `eabrain store-summary`. Invoke the other subcommands via shell when the user asks you to recall, log, or search.
+
+- `eabrain inject` — emit preamble + recent context (called by SessionStart hook)
+- `eabrain remember <note>` — store a quick observation
+- `eabrain store <text> --type {decision|bug|architecture|pattern|error|note}`
+- `eabrain store-summary <text>` — close the current session with a summary (called by SessionEnd hook)
+- `eabrain recall [--last N]` — show recent observations
+- `eabrain timeline [--project P] [--last N] [--since DATE]`
+- `eabrain search <q> [--fuzzy] [--kernels-only|--memory-only]`
+- `eabrain serve [--port 37777]` — web viewer
+- `eabrain sync --export PATH | --import PATH`
+- `eabrain migrate` — port v0.1 session notes from index.bin → memory.db
+
+Prefer `store --type` over `remember` when the observation has a clear category.
+"""
+
 
 def ensure_preamble(preamble_dir: str) -> None:
     if os.path.isdir(preamble_dir) and os.listdir(preamble_dir):
@@ -85,6 +104,8 @@ def ensure_preamble(preamble_dir: str) -> None:
         f.write(_DEFAULT_PRINCIPLES)
     with open(os.path.join(preamble_dir, "02_hard_rules.md"), "w", encoding="utf-8") as f:
         f.write(_DEFAULT_HARD_RULES)
+    with open(os.path.join(preamble_dir, "03_commands.md"), "w", encoding="utf-8") as f:
+        f.write(_DEFAULT_COMMANDS)
 
 
 def load_preamble(preamble_dir: str) -> str:

@@ -128,9 +128,14 @@ def test_ensure_preamble_creates_defaults():
         ensure_preamble(preamble_dir)
         assert os.path.exists(os.path.join(preamble_dir, "01_principles.md"))
         assert os.path.exists(os.path.join(preamble_dir, "02_hard_rules.md"))
+        assert os.path.exists(os.path.join(preamble_dir, "03_commands.md"))
         with open(os.path.join(preamble_dir, "01_principles.md")) as f:
             content = f.read()
         assert "Think Before Coding" in content
+        with open(os.path.join(preamble_dir, "03_commands.md")) as f:
+            commands = f.read()
+        assert "eabrain recall" in commands
+        assert "eabrain store-summary" in commands
 
 
 def test_ensure_preamble_does_not_overwrite():
