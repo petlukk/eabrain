@@ -186,6 +186,48 @@ If you're Claude Code (or another AI) reading this:
 
 Use `eabrain timeline --last 10` to recall what happened across recent sessions.
 
+### Wire it into Claude Code (auto-inject + auto-close)
+
+Add this to `~/.claude/settings.json` so Claude Code calls `inject` at session
+start and `store-summary` at session end automatically. Both hooks are
+best-effort: if `eabrain` isn't on PATH the session continues normally.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "out=$(eabrain inject --project \"${CLAUDE_PROJECT_DIR:-$PWD}\" 2>/dev/null) && jq -nc --arg ctx \"$out\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:$ctx}}' || true"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "eabrain store-summary \"session ended\" >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The `SessionStart` hook prints `inject`'s output as `additionalContext`, so
+the preamble + recent observations land in Claude's context window before
+your first message. The `SessionEnd` hook closes the open session so the
+next `inject` has a real "Last Session" summary to surface.
+
+After editing `~/.claude/settings.json`, open `/hooks` in Claude Code once
+to reload the config (the file watcher only watches dirs that already had
+a settings file at launch).
+
 ---
 
 ## Configuration
