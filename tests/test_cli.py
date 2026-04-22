@@ -253,3 +253,19 @@ def test_resolve_eacompute_dir_no_sibling_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(eabrain, "__file__", str(eabrain_dir / "eabrain.py"))
     monkeypatch.delenv("EACOMPUTE_DIR", raising=False)
     assert eabrain._resolve_eacompute_dir(None) is None
+
+
+def test_patterns_list_empty_when_no_history(tmp_path, capsys):
+    from eabrain import cmd_patterns
+    ar_dir = tmp_path / "autoresearch" / "kernels"
+    (ar_dir / "matmul").mkdir(parents=True)
+    (ar_dir / "dotprod").mkdir(parents=True)
+
+    class Args:
+        query = None
+        what_works = False
+
+    cfg = {"autoresearch_dir": str(ar_dir)}
+    cmd_patterns(Args(), cfg)
+    captured = capsys.readouterr()
+    assert "0 of 2 kernels benchmarked" in captured.out

@@ -397,6 +397,7 @@ def cmd_patterns(args, cfg):
         print("Available autoresearch benchmarks:\n")
         print(f"{'Kernel':25s} {'Iters':>6s} {'Accepted':>9s} {'Best':>10s}")
         print("-" * 55)
+        benchmarked = 0
         for name in kernel_dirs:
             hist_path = os.path.join(ar_dir, name, "history.json")
             if not os.path.exists(hist_path):
@@ -407,6 +408,10 @@ def cmd_patterns(args, cfg):
             best = accepted[-1] if accepted else None
             t = f"{best['time_us']:.0f}us" if best and best.get("time_us") else "-"
             print(f"{name:25s} {len(history):>6d} {len(accepted):>9d} {t:>10s}")
+            benchmarked += 1
+        if benchmarked == 0:
+            print(f"(0 of {len(kernel_dirs)} kernels benchmarked — no history.json files "
+                  f"under {ar_dir}. Run autoresearch to populate.)")
         print(f"\nUse: eabrain patterns <name> for details")
         print("Use: eabrain patterns --what-works for proven optimization patterns")
         return
