@@ -32,6 +32,7 @@ def config_file(tmp_path):
         "index_path": str(tmp_path / "index.bin"),
         "max_source_lines": 50,
         "max_session_entries": 100,
+        "eabrain_dir": str(tmp_path),
     }
     p = tmp_path / "config.json"
     p.write_text(json.dumps(config))

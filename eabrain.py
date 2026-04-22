@@ -116,55 +116,99 @@ def cmd_index(args, cfg):
 
 
 def cmd_search(args, cfg):
-    from indexer import read_index
-    idx = read_index(cfg["index_path"])
-    kernels = idx["kernels"]
+    from indexer import read_index, _simd_byte_histogram
     query = args.query
     max_lines = cfg["max_source_lines"]
+    memory_only = getattr(args, "memory_only", False)
+    kernels_only = getattr(args, "kernels_only", False)
 
-    if args.fuzzy:
-        fuzzy_lib = _load_lib("libfuzzy.so")
-        from indexer import _simd_byte_histogram
-        hist = _simd_byte_histogram(query.encode("utf-8"))
+    fuzzy_lib = None
+    hist = None
 
-        emb = idx["embeddings"]
-        n = len(kernels)
-        if n == 0 or emb.shape[0] == 0:
-            results = []
+    # Kernel search
+    if not memory_only:
+        idx = read_index(cfg["index_path"])
+        kernels = idx["kernels"]
+        if args.fuzzy:
+            fuzzy_lib = _load_lib("libfuzzy.so")
+            hist = _simd_byte_histogram(query.encode("utf-8"))
+            emb = idx["embeddings"]
+            n = len(kernels)
+            if n == 0 or emb.shape[0] == 0:
+                results = []
+            else:
+                scores = np.zeros(n, dtype=np.float32)
+                fuzzy_lib.batch_cosine(
+                    hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    ctypes.c_float(1.0),
+                    emb.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    ctypes.c_int32(256),
+                    ctypes.c_int32(n),
+                    scores.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                )
+                order = np.argsort(scores)[::-1][:10]
+                results = [kernels[i] for i in order if scores[i] > 0]
         else:
-            scores = np.zeros(n, dtype=np.float32)
-            fuzzy_lib.batch_cosine(
-                hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                ctypes.c_float(1.0),
-                emb.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                ctypes.c_int32(256),
-                ctypes.c_int32(n),
-                scores.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            )
-            order = np.argsort(scores)[::-1][:10]
-            results = [kernels[i] for i in order if scores[i] > 0]
+            ql = query.lower()
+            results = [k for k in kernels
+                       if ql in k["func_name"].lower() or ql in k["path"].lower()]
+
+        if args.arch:
+            results = [k for k in results if k["arch"] == args.arch]
+
+        ts = idx["header"]["timestamp"]
+        print(f"# eabrain search: {query}\n")
+        print(f"{len(results)} kernel results (indexed {_time_ago(ts)}, {len(kernels)} kernels)\n")
+        for i, k in enumerate(results[:10], 1):
+            rel = k["path"]
+            print(f"{i}. {rel}:{k['line_start']}")
+            print(f"   export func {k['func_name']}(...)")
+            print(f"   arch: {k['arch']}  simd: f32x{k['simd_width']}  lines: {k['line_count']}")
+            src = _read_source(k["path"], k["line_start"], k["line_count"], max_lines)
+            if src is not None:
+                print(f"   [source: {k['line_count']} lines]")
+                for line in src.split("\n"):
+                    print(f"   {line}")
+            print()
     else:
-        ql = query.lower()
-        results = [k for k in kernels
-                   if ql in k["func_name"].lower() or ql in k["path"].lower()]
+        print(f"# eabrain search: {query}\n")
 
-    if args.arch:
-        results = [k for k in results if k["arch"] == args.arch]
+    # Observation search
+    if not kernels_only:
+        db = _get_db(cfg)
+        obs_results = []
+        if args.fuzzy:
+            obs_ids, obs_emb = db.load_embeddings()
+            if len(obs_ids) > 0:
+                if fuzzy_lib is None:
+                    fuzzy_lib = _load_lib("libfuzzy.so")
+                if hist is None:
+                    hist = _simd_byte_histogram(query.encode("utf-8"))
+                obs_scores = np.zeros(len(obs_ids), dtype=np.float32)
+                fuzzy_lib.batch_cosine(
+                    hist.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    ctypes.c_float(1.0),
+                    obs_emb.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    ctypes.c_int32(256),
+                    ctypes.c_int32(len(obs_ids)),
+                    obs_scores.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                )
+                order = np.argsort(obs_scores)[::-1][:5]
+                for idx_i in order:
+                    if obs_scores[idx_i] > 0:
+                        obs_row = db.conn.execute(
+                            "SELECT * FROM observations WHERE id = ?", (obs_ids[idx_i],)
+                        ).fetchone()
+                        if obs_row:
+                            obs_results.append(dict(obs_row))
+        else:
+            obs_results = db.simd_search(query, limit=5)
 
-    ts = idx["header"]["timestamp"]
-    print(f"# eabrain search: {query}\n")
-    print(f"{len(results)} results (indexed {_time_ago(ts)}, {len(kernels)} kernels)\n")
-    for i, k in enumerate(results[:10], 1):
-        rel = k["path"]
-        print(f"{i}. {rel}:{k['line_start']}")
-        print(f"   export func {k['func_name']}(...)")
-        print(f"   arch: {k['arch']}  simd: f32x{k['simd_width']}  lines: {k['line_count']}")
-        src = _read_source(k["path"], k["line_start"], k["line_count"], max_lines)
-        if src is not None:
-            print(f"   [source: {k['line_count']} lines]")
-            for line in src.split("\n"):
-                print(f"   {line}")
-        print()
+        if obs_results:
+            print(f"## Memory ({len(obs_results)} matches)\n")
+            for o in obs_results:
+                print(f"  [{o['type']}] {o['content'][:100]}")
+        db.close()
 
 
 def cmd_ref(args, cfg):
@@ -199,29 +243,34 @@ def cmd_ref(args, cfg):
 
 
 def cmd_remember(args, cfg):
-    from indexer import read_index, write_index
-    idx = read_index(cfg["index_path"])
-    sessions = idx["sessions"]
-    sessions.append({"text": args.note, "timestamp": int(time.time())})
-    max_s = cfg["max_session_entries"]
-    if len(sessions) > max_s:
-        sessions = sessions[-max_s:]
-    write_index(cfg["index_path"], idx["kernels"], idx["refs"], sessions, idx["embeddings"])
+    from inject import get_current_session_id
+    from indexer import _simd_byte_histogram
+    db = _get_db(cfg)
+    sid = get_current_session_id(_get_session_file(cfg))
+    emb = _simd_byte_histogram(args.note.encode("utf-8"))
+    db.store_observation(
+        project=os.getcwd(),
+        obs_type="note",
+        content=args.note,
+        session_id=sid,
+        embedding=emb.tobytes(),
+    )
     print(f"Remembered: {args.note}")
+    db.close()
 
 
 def cmd_recall(args, cfg):
-    from indexer import read_index
-    idx = read_index(cfg["index_path"])
-    sessions = idx["sessions"]
-    n = args.last if args.last else len(sessions)
-    shown = sessions[-n:] if n < len(sessions) else sessions
-    if not shown:
-        print("No session notes.")
+    db = _get_db(cfg)
+    n = args.last if args.last else 20
+    results = db.recent(limit=n)
+    if not results:
+        print("No observations.")
+        db.close()
         return
-    print(f"# Session notes ({len(shown)} entries)\n")
-    for s in shown:
-        print(f"[{_time_ago(s['timestamp'])}] {s['text']}")
+    print(f"# Observations ({len(results)} entries)\n")
+    for r in results:
+        print(f"[{r['created_at'][:16]}] [{r['type']}] {r['content']}")
+    db.close()
 
 
 def cmd_status(args, cfg):
@@ -241,13 +290,27 @@ def cmd_status(args, cfg):
         print(f"eabrain v{_VERSION}  (no index — run: eabrain index)")
         print(f"Projects: {len(cfg['projects'])}")
     print(f"Ea compiler: {cfg['ea_compiler'] or '(not found — set $EA or put ea on PATH)'}")
+
+    db_path = os.path.join(cfg["eabrain_dir"], "memory.db")
+    if os.path.exists(db_path):
+        db = _get_db(cfg)
+        s = db.stats()
+        print(f"Observations: {s['observation_count']}")
+        print(f"Sessions: {s['session_count']}")
+        if s["last_session"]:
+            print(f"Last session: {s['last_session'][:16]}")
+        print(f"Memory DB: {s['db_size_bytes'] // 1024}KB")
+        db.close()
+
     print()
     print("Common commands:")
     print("  eabrain index              # build index")
-    print("  eabrain search <query>     # search kernels")
+    print("  eabrain search <query>     # search kernels and observations")
     print("  eabrain ref <name>         # look up Ea reference")
-    print("  eabrain remember <note>    # save session note")
-    print("  eabrain recall             # show session notes")
+    print("  eabrain remember <note>    # save observation")
+    print("  eabrain recall             # show recent observations")
+    print("  eabrain timeline           # show session timeline")
+    print("  eabrain serve              # start web viewer")
 
 
 def cmd_patterns(args, cfg):
@@ -548,11 +611,14 @@ def main():
     p_index = sub.add_parser("index", help="Build index")
     p_index.add_argument("--projects", help="Comma-separated project dirs")
 
-    p_search = sub.add_parser("search", help="Search kernels")
+    p_search = sub.add_parser("search", help="Search kernels and observations")
     p_search.add_argument("query")
     p_search.add_argument("--fuzzy", action="store_true", help="Use cosine similarity")
     p_search.add_argument("--arch", choices=["arm", "x86", "aarch64", "x86_64"],
                           help="Filter by arch")
+    scope = p_search.add_mutually_exclusive_group()
+    scope.add_argument("--kernels-only", action="store_true", help="Search kernels only")
+    scope.add_argument("--memory-only", action="store_true", help="Search observations only")
 
     p_ref = sub.add_parser("ref", help="Look up Ea reference")
     p_ref.add_argument("query")
