@@ -219,3 +219,37 @@ class MemoryDB:
             if len(matches) >= limit:
                 break
         return matches
+
+
+def migrate_from_index(db: MemoryDB, index_path: str, project: str = "legacy") -> int:
+    """Migrate v0.1 session notes from index.bin into a single legacy session in memory.db.
+
+    Idempotent: a marker session with summary "[migrated from index.bin]" is created
+    on first run; subsequent runs detect it and skip.
+    """
+    from indexer import read_index
+
+    idx = read_index(index_path)
+    sessions = idx.get("sessions", [])
+    if not sessions:
+        return 0
+
+    existing = db.conn.execute(
+        "SELECT id FROM sessions WHERE project = ? AND summary = ?",
+        (project, "[migrated from index.bin]"),
+    ).fetchone()
+    if existing:
+        return 0
+
+    sid = db.create_session(project=project)
+    count = 0
+    for s in sessions:
+        db.store_observation(
+            project=project,
+            obs_type="note",
+            content=s["text"],
+            session_id=sid,
+        )
+        count += 1
+    db.close_session(sid, summary="[migrated from index.bin]")
+    return count
