@@ -73,7 +73,7 @@ def test_inject_prints_preamble(tmp_path, capsys):
     preamble_dir = tmp_path / "preamble"
     preamble_dir.mkdir()
     (preamble_dir / "principles.md").write_text("Think before coding.")
-    from eabrain import cmd_inject
+    from commands.system import cmd_inject
 
     class Args:
         project = str(tmp_path)
@@ -90,7 +90,7 @@ def test_inject_prints_preamble(tmp_path, capsys):
 
 def test_store_creates_observation(tmp_path):
     from memory import MemoryDB
-    from eabrain import cmd_store
+    from commands.memory import cmd_store
 
     db_path = str(tmp_path / "memory.db")
     session_file = str(tmp_path / "current_session")
@@ -117,7 +117,7 @@ def test_store_creates_observation(tmp_path):
 
 def test_timeline_shows_sessions(tmp_path, capsys):
     from memory import MemoryDB
-    from eabrain import cmd_timeline
+    from commands.memory import cmd_timeline
 
     db_path = str(tmp_path / "memory.db")
     db = MemoryDB(db_path)
@@ -140,7 +140,7 @@ def test_timeline_shows_sessions(tmp_path, capsys):
 
 def test_store_summary_closes_session(tmp_path, capsys):
     from memory import MemoryDB
-    from eabrain import cmd_store_summary
+    from commands.memory import cmd_store_summary
 
     db_path = str(tmp_path / "memory.db")
     session_file = str(tmp_path / "current_session")
@@ -168,7 +168,7 @@ def test_store_summary_closes_session(tmp_path, capsys):
 def test_migrate_command(tmp_path, capsys):
     import numpy as np
     from indexer import write_index
-    from eabrain import cmd_migrate
+    from commands.memory import cmd_migrate
 
     idx_path = tmp_path / "index.bin"
     sessions = [{"text": "old note", "timestamp": 1713700000}]
@@ -185,7 +185,7 @@ def test_migrate_command(tmp_path, capsys):
 
 def test_sync_export_import(tmp_path, capsys):
     from memory import MemoryDB
-    from eabrain import cmd_sync
+    from commands.memory import cmd_sync
 
     db_path = str(tmp_path / "memory.db")
     db = MemoryDB(db_path)
@@ -256,7 +256,7 @@ def test_resolve_eacompute_dir_no_sibling_returns_none(tmp_path, monkeypatch):
 
 
 def test_patterns_list_empty_when_no_history(tmp_path, capsys):
-    from eabrain import cmd_patterns
+    from commands.search import cmd_patterns
     ar_dir = tmp_path / "autoresearch" / "kernels"
     (ar_dir / "matmul").mkdir(parents=True)
     (ar_dir / "dotprod").mkdir(parents=True)
