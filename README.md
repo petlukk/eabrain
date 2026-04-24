@@ -203,6 +203,30 @@ Parallel sessions across machines are safe:
 Sequential use still produces the cleanest history (fewer retry commits),
 but parallel use no longer risks lost observations.
 
+### Safety scan on writes
+
+Every write to the memory DB (`eabrain store`, `eabrain remember`,
+`eabrain store-summary`) passes through a fused Eä SIMD scanner
+(`kernels/fused_safety.ea`) that detects secret-leak patterns —
+Anthropic / OpenAI / AWS / GitHub / Slack / Stripe / Google API keys,
+PEM private keys, Bearer tokens, and more. Content matching any pattern
+is rejected with exit code 2 and a description of what fired, so a
+secret never lands in the DB (and therefore never gets synced to the
+remote repo).
+
+```
+$ eabrain store --type note "token: ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+eabrain store: Content rejected by safety scan:
+  - secret_leak: GitHub personal token @ offset 7
+```
+
+Prompt-injection patterns (`ignore previous instructions`, `<|im_start|>`,
+role-manipulation phrases) are also detected in the same SIMD pass, but
+**not** blocked — legitimate dev notes can contain phrases like "Claude
+should pretend to be a senior reviewer," so injection detection is
+available via `safety.scan()` for callers who want it without being
+forced on the default write path.
+
 ### Autoresearch patterns
 
 If you have the [eacompute](https://github.com/petlukk/eacompute) autoresearch

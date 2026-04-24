@@ -64,6 +64,8 @@ class MemoryDB:
         session_id: str = None,
         embedding: bytes = None,
     ) -> str:
+        from safety import check_or_raise
+        check_or_raise(content)
         obs_id = str(uuid.uuid4())
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         now = datetime.now(timezone.utc).isoformat()
@@ -122,6 +124,8 @@ class MemoryDB:
         return sid
 
     def close_session(self, session_id: str, summary: str) -> None:
+        from safety import check_or_raise
+        check_or_raise(summary)
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "UPDATE sessions SET ended_at = ?, summary = ? WHERE id = ?",

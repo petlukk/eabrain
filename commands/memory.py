@@ -1,24 +1,31 @@
 """Memory-DB commands: remember, recall, store, store-summary, timeline, migrate, sync."""
 
 import os
+import sys
 
 
 def cmd_remember(args, cfg):
     from eabrain import _get_db, _get_session_file
     from inject import get_current_session_id
     from indexer import _simd_byte_histogram
+    from safety import SafetyScanError
     db = _get_db(cfg)
-    sid = get_current_session_id(_get_session_file(cfg))
-    emb = _simd_byte_histogram(args.note.encode("utf-8"))
-    db.store_observation(
-        project=os.getcwd(),
-        obs_type="note",
-        content=args.note,
-        session_id=sid,
-        embedding=emb.tobytes(),
-    )
-    print(f"Remembered: {args.note}")
-    db.close()
+    try:
+        sid = get_current_session_id(_get_session_file(cfg))
+        emb = _simd_byte_histogram(args.note.encode("utf-8"))
+        db.store_observation(
+            project=os.getcwd(),
+            obs_type="note",
+            content=args.note,
+            session_id=sid,
+            embedding=emb.tobytes(),
+        )
+        print(f"Remembered: {args.note}")
+    except SafetyScanError as e:
+        print(f"eabrain remember: {e}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        db.close()
 
 
 def cmd_recall(args, cfg):
@@ -40,34 +47,46 @@ def cmd_store(args, cfg):
     from eabrain import _get_db, _get_session_file
     from inject import get_current_session_id
     from indexer import _simd_byte_histogram
+    from safety import SafetyScanError
     db = _get_db(cfg)
-    sid = get_current_session_id(_get_session_file(cfg))
-    project = getattr(args, "project", None) or os.getcwd()
-    content = args.content
-    emb = _simd_byte_histogram(content.encode("utf-8"))
-    db.store_observation(
-        project=project,
-        obs_type=args.type,
-        content=content,
-        session_id=sid,
-        embedding=emb.tobytes(),
-    )
-    print(f"Stored [{args.type}]: {content[:80]}")
-    db.close()
+    try:
+        sid = get_current_session_id(_get_session_file(cfg))
+        project = getattr(args, "project", None) or os.getcwd()
+        content = args.content
+        emb = _simd_byte_histogram(content.encode("utf-8"))
+        db.store_observation(
+            project=project,
+            obs_type=args.type,
+            content=content,
+            session_id=sid,
+            embedding=emb.tobytes(),
+        )
+        print(f"Stored [{args.type}]: {content[:80]}")
+    except SafetyScanError as e:
+        print(f"eabrain store: {e}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        db.close()
 
 
 def cmd_store_summary(args, cfg):
     from eabrain import _get_db, _get_session_file
     from inject import get_current_session_id, end_session
+    from safety import SafetyScanError
     db = _get_db(cfg)
-    session_file = _get_session_file(cfg)
-    sid = get_current_session_id(session_file)
-    if sid:
-        end_session(db, session_id=sid, summary=args.content, session_file=session_file)
-        print(f"Session closed: {args.content[:80]}")
-    else:
-        print("No active session.")
-    db.close()
+    try:
+        session_file = _get_session_file(cfg)
+        sid = get_current_session_id(session_file)
+        if sid:
+            end_session(db, session_id=sid, summary=args.content, session_file=session_file)
+            print(f"Session closed: {args.content[:80]}")
+        else:
+            print("No active session.")
+    except SafetyScanError as e:
+        print(f"eabrain store-summary: {e}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        db.close()
 
 
 def cmd_timeline(args, cfg):
