@@ -56,6 +56,17 @@ def _default_projects() -> list:
     return [parent] if parent and os.path.isdir(parent) else []
 
 
+def _resolve_sync_repo() -> str | None:
+    """Auto-detect an eabrain-memory sibling checkout of the install.
+    Users with a different layout can override by setting `sync_repo` in
+    config.json. Returns None if no clone is found — sync becomes a no-op."""
+    install_dir = os.path.dirname(os.path.abspath(__file__))
+    if "site-packages" in install_dir or "dist-packages" in install_dir:
+        return None
+    sibling = os.path.join(os.path.dirname(install_dir), "eabrain-memory")
+    return sibling if os.path.isdir(os.path.join(sibling, ".git")) else None
+
+
 def _load_config(env_path: str = None) -> dict:
     path = env_path or os.environ.get("EABRAIN_CONFIG") or os.path.expanduser("~/.eabrain/config.json")
     if os.path.exists(path):
@@ -77,6 +88,8 @@ def _load_config(env_path: str = None) -> dict:
     if "autoresearch_dir" not in cfg:
         ec = cfg.get("eacompute_dir")
         cfg["autoresearch_dir"] = os.path.join(ec, "autoresearch", "kernels") if ec else None
+    if "sync_repo" not in cfg:
+        cfg["sync_repo"] = _resolve_sync_repo()
     return cfg
 
 
@@ -508,15 +521,23 @@ def _get_preamble_dir(cfg):
 
 def cmd_inject(args, cfg):
     from inject import build_injection, start_session
+    from sync import last_push_timestamp
     db = _get_db(cfg)
     project = getattr(args, "project", None) or os.getcwd()
     budget = getattr(args, "budget", 2000) or 2000
     start_session(db, project=project, session_file=_get_session_file(cfg))
+
+    sync_status = None
+    ts = last_push_timestamp(cfg.get("sync_repo"))
+    if ts is not None:
+        sync_status = f"Sync: auto · last push {_time_ago(ts)}"
+
     output = build_injection(
         db=db,
         preamble_dir=_get_preamble_dir(cfg),
         project=project,
         budget=budget,
+        sync_status=sync_status,
     )
     print(output)
     db.close()
@@ -589,16 +610,26 @@ def cmd_migrate(args, cfg):
 
 
 def cmd_sync(args, cfg):
-    from sync import export_db, import_db
+    import sync
     db_path = os.path.join(cfg["eabrain_dir"], "memory.db")
+    eabrain_dir = cfg["eabrain_dir"]
+    action = getattr(args, "action", None)
+
+    if action == "pull":
+        sync.pull(db_path, cfg.get("sync_repo"), eabrain_dir)
+        return
+    if action == "push":
+        sync.push(db_path, cfg.get("sync_repo"), eabrain_dir)
+        return
+
     if args.export_path:
-        export_db(db_path, args.export_path)
+        sync.export_db(db_path, args.export_path)
         print(f"Exported memory.db to {args.export_path}")
     elif args.import_path:
-        import_db(db_path, args.import_path)
+        sync.import_db(db_path, args.import_path)
         print(f"Imported and merged from {args.import_path}")
     else:
-        print("Usage: eabrain sync --export <path> or --import <path>")
+        print("Usage: eabrain sync {pull|push} | --export <path> | --import <path>")
 
 
 def cmd_serve(args, cfg):
@@ -683,9 +714,11 @@ def main():
 
     sub.add_parser("migrate", help="Migrate v0.1 notes to memory.db")
 
-    p_sync = sub.add_parser("sync", help="Export or import memory.db")
-    p_sync.add_argument("--export", dest="export_path", help="Export to path")
-    p_sync.add_argument("--import", dest="import_path", help="Import from path")
+    p_sync = sub.add_parser("sync", help="Sync memory.db with git remote")
+    p_sync.add_argument("action", nargs="?", choices=["pull", "push"],
+                        help="Git-backed sync action (requires sync_repo configured)")
+    p_sync.add_argument("--export", dest="export_path", help="Export local db to path")
+    p_sync.add_argument("--import", dest="import_path", help="Merge db at path into local")
 
     p_serve = sub.add_parser("serve", help="Start web viewer")
     p_serve.add_argument("--port", type=int, default=37777, help="Port number")

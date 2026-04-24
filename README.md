@@ -109,125 +109,99 @@ sessions; right panel: observation detail; top bar: search + project/type filter
 
 ### Cross-machine sync
 
-The raw primitives:
+`eabrain sync pull` and `eabrain sync push` keep a single `memory.db` mirrored
+across machines via a private git repo. Merges are content-hash idempotent
+(same observation from two machines dedupes cleanly) and push is race-safe
+(retries up to 3× on non-fast-forward rejection, re-importing remote rows
+between attempts).
 
 ```bash
-eabrain sync --export /tmp/backup.db    # dump memory.db
+eabrain sync pull    # fetch origin, reset to it, merge remote observations into local db
+eabrain sync push    # pull, merge, export, commit, push — with retry on race
+```
+
+Manual primitives are still available:
+
+```bash
+eabrain sync --export /tmp/backup.db    # verbatim copy of memory.db
 eabrain sync --import /tmp/backup.db    # merge by content hash, dedup safely
 ```
 
-#### Pattern: private memory repo + Claude Code hooks
+#### Setup: private memory repo + Claude Code hooks
 
-For continuous sync across machines (instead of manual export/import), create
-a **private** git repo for your memory database and wire two scripts into
-Claude Code's `SessionStart` / `SessionEnd` hooks. The `eabrain` tool itself
-stays public (it's a shared CLI); your cross-project notes stay private.
+The `eabrain` tool itself is public (a shared CLI); your cross-project notes
+stay private in a separate `eabrain-memory` repo.
 
 ```bash
 # 1. Create an empty PRIVATE GitHub repo for your memory
 gh repo create <you>/eabrain-memory --private --clone=false
 
-# 2. Clone it somewhere stable on this machine
-git clone https://github.com/<you>/eabrain-memory.git ~/eabrain-memory
+# 2. Clone it as a sibling of your eabrain install (auto-detected)
+#    or anywhere, then point sync_repo at it in ~/.eabrain/config.json
+git clone https://github.com/<you>/eabrain-memory.git <eabrain-install>/../eabrain-memory
 
-# 3. Seed it with an initial export
-cd ~/eabrain-memory
-eabrain sync --export memory.db
-git add memory.db
-git commit -m "initial sync"
-git push -u origin main
+# 3. Seed it with your current memory and push
+cd <eabrain-install>/../eabrain-memory
+eabrain sync push     # exports local memory.db, commits, pushes
 ```
 
-Drop these two scripts into the cloned repo:
-
-`~/eabrain-memory/sync-pull.sh`:
-
-```bash
-#!/usr/bin/env bash
-# SessionStart: pull latest memory.db and import into local eabrain.
-# Best-effort — never fails the caller.
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$REPO" 2>/dev/null || exit 0
-command -v eabrain >/dev/null 2>&1 || exit 0
-[ -d "$REPO/.git" ] || exit 0
-
-# --ff-only refuses to overwrite unpushed local commits.
-git pull -q --ff-only origin main >/dev/null 2>&1 || exit 0
-[ -f "$REPO/memory.db" ] || exit 0
-eabrain sync --import "$REPO/memory.db" >/dev/null 2>&1 || exit 0
-exit 0
-```
-
-`~/eabrain-memory/sync-push.sh`:
-
-```bash
-#!/usr/bin/env bash
-# SessionEnd: export memory.db and push if it changed.
-# Best-effort — never fails the caller.
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$REPO" 2>/dev/null || exit 0
-command -v eabrain >/dev/null 2>&1 || exit 0
-[ -d "$REPO/.git" ] || exit 0
-
-eabrain sync --export "$REPO/memory.db" >/dev/null 2>&1 || exit 0
-git add memory.db >/dev/null 2>&1
-if ! git diff --cached --quiet 2>/dev/null; then
-    git commit -q -m "sync $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1
-    git push -q origin main >/dev/null 2>&1
-fi
-exit 0
-```
-
-```bash
-chmod +x ~/eabrain-memory/sync-pull.sh ~/eabrain-memory/sync-push.sh
-git add sync-pull.sh sync-push.sh
-git commit -m "add sync scripts"
-git push
-```
-
-Wire them into `~/.claude/settings.json` alongside the existing `eabrain
-inject` / `store-summary` hooks (see *Wire it into Claude Code* section
-below for the base form):
+Wire into `~/.claude/settings.json`:
 
 ```json
 "SessionStart": [{ "hooks": [{ "type": "command",
-  "command": "~/eabrain-memory/sync-pull.sh; out=$(eabrain inject --project \"${CLAUDE_PROJECT_DIR:-$PWD}\" 2>/dev/null) && python3 -c '…' \"$out\" || true"
+  "command": "eabrain sync pull 2>/dev/null; out=$(eabrain inject --project \"${CLAUDE_PROJECT_DIR:-$PWD}\" 2>/dev/null) && python3 -c '…' \"$out\" || true"
 }]}],
 "SessionEnd": [{ "hooks": [{ "type": "command",
-  "command": "eabrain store-summary \"session ended\" >/dev/null 2>&1; ~/eabrain-memory/sync-push.sh; true"
+  "command": "eabrain store-summary \"session ended\" >/dev/null 2>&1; eabrain sync push >/dev/null 2>&1; true"
 }]}]
 ```
 
 On every session:
-- **Start**: pull + import (`--ff-only` keeps unpushed local commits safe)
-  runs before `eabrain inject`, so the preamble gets the freshest context.
-- **End**: `store-summary` archives, then `sync-push.sh` exports + commits +
-  pushes — only if the DB changed, so no noise commits.
+- **Start**: `sync pull` merges the latest remote state into local, then
+  `eabrain inject` builds the preamble from it. Inject also prints a
+  `Sync: auto · last push Xm ago` status line so you can see staleness.
+- **End**: `store-summary` archives the session summary, then `sync push`
+  exports + commits + pushes — skips the commit if the DB didn't change.
+
+Both commands are best-effort: network failures, missing repos, auth issues
+all exit 0 and log a line to `~/.eabrain/sync.log`, so a session never blocks
+on sync problems.
+
+#### Configuration
+
+`sync_repo` defaults to `<eabrain-install>/../eabrain-memory`. Override in
+`~/.eabrain/config.json` if you clone elsewhere:
+
+```json
+{ "sync_repo": "/path/to/your/eabrain-memory" }
+```
+
+If `sync_repo` points to a non-git-repo (or isn't set), `sync pull/push` are
+silent no-ops.
 
 #### Setting up a second machine
 
 ```bash
 git clone https://github.com/<you>/eabrain-memory.git <local-path>
-chmod +x <local-path>/sync-{pull,push}.sh
-eabrain sync --import <local-path>/memory.db
-# Edit ~/.claude/settings.json with the hook snippets above,
-# substituting <local-path> for ~/eabrain-memory.
+# Set sync_repo in ~/.eabrain/config.json if not a sibling of eabrain install
+eabrain sync pull     # seeds local memory.db from remote
+# Wire the same SessionStart / SessionEnd hooks into ~/.claude/settings.json
 ```
 
-Both scripts resolve their repo via `BASH_SOURCE`, so the clone location
-doesn't have to match across machines — only the hook's absolute path does.
+#### Concurrency
 
-#### Multi-machine caveat
+Parallel sessions across machines are safe:
 
-`memory.db` is one SQLite file and `eabrain` has no merge mode. If two
-machines modify the DB in parallel between syncs, the second-to-push's
-session data is only preserved if the first push was pulled by the
-second machine before it exported.
+- `import_db` keys off `content_hash`, so the same observation stored on two
+  machines merges to a single row regardless of arrival order.
+- `push` runs `fetch → reset → import → export → commit → push` in a loop,
+  retrying on non-ff rejection. Each retry absorbs any newly-pushed remote
+  rows before re-attempting — no data lost under contention.
+- Session summaries merge with "longest wins". If both machines update the
+  same session summary, whichever is longer is preserved.
 
-**Use sequentially** (finish on one machine before starting on another)
-and the auto-sync keeps them consistent. For true parallel use you'd
-need manual conflict resolution — or contributions welcome for a
-timestamp-driven merge mode in `sync.py`.
+Sequential use still produces the cleanest history (fewer retry commits),
+but parallel use no longer risks lost observations.
 
 ### Autoresearch patterns
 

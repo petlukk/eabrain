@@ -89,7 +89,9 @@ _DEFAULT_COMMANDS = """\
 - `eabrain timeline [--project P] [--last N] [--since DATE]`
 - `eabrain search <q> [--fuzzy] [--kernels-only|--memory-only]`
 - `eabrain serve [--port 37777]` — web viewer
-- `eabrain sync --export PATH | --import PATH`
+- `eabrain sync pull` — fetch remote memory.db and merge into local (called by SessionStart hook)
+- `eabrain sync push` — export local memory.db and push to remote, race-safe (called by SessionEnd hook)
+- `eabrain sync --export PATH | --import PATH` — manual one-shot primitives
 - `eabrain migrate` — port v0.1 session notes from index.bin → memory.db
 
 Prefer `store --type` over `remember` when the observation has a clear category.
@@ -129,6 +131,7 @@ def build_injection(
     preamble_dir: str,
     project: str,
     budget: int = 2000,
+    sync_status: str = None,
 ) -> str:
     sections = []
 
@@ -141,6 +144,10 @@ def build_injection(
     # 2. Dynamic context (respects budget)
     dynamic_parts = []
     used = 0
+
+    if sync_status:
+        dynamic_parts.append(sync_status)
+        used += _estimate_tokens(sync_status)
 
     # Last session summary
     last_sessions = db.timeline(project=project, limit=1)
