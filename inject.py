@@ -79,22 +79,44 @@ Apply these rules to ALL code:
 _DEFAULT_COMMANDS = """\
 ## eabrain CLI
 
-`eabrain` is a persistent memory + Eä-kernel search tool. The SessionStart hook already runs `eabrain inject`; SessionEnd runs `eabrain store-summary`. Invoke the other subcommands via shell when the user asks you to recall, log, or search.
+`eabrain` is a persistent memory + Eä-kernel search tool. SessionStart auto-runs
+`eabrain sync pull` + `eabrain inject`; SessionEnd auto-runs `eabrain store-summary`
++ `eabrain sync push`. **Do not run `eabrain <subcommand> --help` — this section
+is the reference.** Run the trigger commands directly without further confirmation.
+
+### Trigger phrases → command
+
+| User says | Run |
+|-----------|-----|
+| "remember this", "save this", "log this …" | `eabrain remember "<note>"` |
+| "remember <X> as a decision/bug/architecture/pattern/error" | `eabrain store "<X>" --type <category>` |
+| "search for X", "find X" | `eabrain search "X"` — add `--fuzzy` only if substring returns 0 results; add `--memory-only`/`--kernels-only` only when the user is explicit about scope |
+| "recall", "what did I do recently", "recent notes" | `eabrain recall --last 10` |
+| "show the timeline", "timeline for project X", "what happened since DATE" | `eabrain timeline [--project X] [--since DATE]` |
+| "sync", "save memory", "sync up" | `eabrain sync push` — pull already ran at SessionStart, default to push |
+| "pull memory", "fetch from other machine" | `eabrain sync pull` |
+| "open the viewer", "show memory in browser" | `eabrain serve` (run in background) |
+
+Category hint for `store`: `note` is the safe default; upgrade to `decision`/
+`bug`/`architecture`/`pattern`/`error` only when the text clearly fits.
+
+For content over ~128 KiB (the OS argv limit), pipe via stdin instead of passing
+as an argument: `cat big.txt | eabrain store --type note` or `eabrain store - --type note < big.txt`.
+
+### Command reference
 
 - `eabrain inject` — emit preamble + recent context (called by SessionStart hook)
 - `eabrain remember <note>` — store a quick observation
 - `eabrain store <text> --type {decision|bug|architecture|pattern|error|note}`
-- `eabrain store-summary <text>` — close the current session with a summary (called by SessionEnd hook)
+- `eabrain store-summary <text>` — close the current session (called by SessionEnd hook)
 - `eabrain recall [--last N]` — show recent observations
 - `eabrain timeline [--project P] [--last N] [--since DATE]`
 - `eabrain search <q> [--fuzzy] [--kernels-only|--memory-only]`
 - `eabrain serve [--port 37777]` — web viewer
-- `eabrain sync pull` — fetch remote memory.db and merge into local (called by SessionStart hook)
-- `eabrain sync push` — export local memory.db and push to remote, race-safe (called by SessionEnd hook)
-- `eabrain sync --export PATH | --import PATH` — manual one-shot primitives
+- `eabrain sync pull` — fetch remote memory.db and merge (auto at SessionStart)
+- `eabrain sync push` — export and push to remote, race-safe (auto at SessionEnd)
+- `eabrain sync --export PATH | --import PATH` — manual primitives
 - `eabrain migrate` — port v0.1 session notes from index.bin → memory.db
-
-Prefer `store --type` over `remember` when the observation has a clear category.
 """
 
 
