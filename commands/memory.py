@@ -4,6 +4,21 @@ import os
 import sys
 
 
+def _resolve_content(value, cmd_name: str) -> str:
+    """Return `value` unchanged, or read stdin when value is None or '-'.
+
+    Lets callers pipe content larger than the OS argv limit
+    (MAX_ARG_STRLEN, 128 KiB on Linux) into store/remember/store-summary.
+    """
+    if value is not None and value != "-":
+        return value
+    if sys.stdin.isatty():
+        print(f"eabrain {cmd_name}: no content provided "
+              "(pass as argument or pipe via stdin)", file=sys.stderr)
+        sys.exit(2)
+    return sys.stdin.read()
+
+
 def cmd_remember(args, cfg):
     from eabrain import _get_db, _get_session_file
     from inject import get_current_session_id
@@ -11,16 +26,17 @@ def cmd_remember(args, cfg):
     from safety import SafetyScanError
     db = _get_db(cfg)
     try:
+        note = _resolve_content(args.note, "remember")
         sid = get_current_session_id(_get_session_file(cfg))
-        emb = _simd_byte_histogram(args.note.encode("utf-8"))
+        emb = _simd_byte_histogram(note.encode("utf-8"))
         db.store_observation(
             project=os.getcwd(),
             obs_type="note",
-            content=args.note,
+            content=note,
             session_id=sid,
             embedding=emb.tobytes(),
         )
-        print(f"Remembered: {args.note}")
+        print(f"Remembered: {note[:80]}")
     except SafetyScanError as e:
         print(f"eabrain remember: {e}", file=sys.stderr)
         sys.exit(2)
@@ -50,9 +66,9 @@ def cmd_store(args, cfg):
     from safety import SafetyScanError
     db = _get_db(cfg)
     try:
+        content = _resolve_content(args.content, "store")
         sid = get_current_session_id(_get_session_file(cfg))
         project = getattr(args, "project", None) or os.getcwd()
-        content = args.content
         emb = _simd_byte_histogram(content.encode("utf-8"))
         db.store_observation(
             project=project,
@@ -75,11 +91,12 @@ def cmd_store_summary(args, cfg):
     from safety import SafetyScanError
     db = _get_db(cfg)
     try:
+        content = _resolve_content(args.content, "store-summary")
         session_file = _get_session_file(cfg)
         sid = get_current_session_id(session_file)
         if sid:
-            end_session(db, session_id=sid, summary=args.content, session_file=session_file)
-            print(f"Session closed: {args.content[:80]}")
+            end_session(db, session_id=sid, summary=content, session_file=session_file)
+            print(f"Session closed: {content[:80]}")
         else:
             print("No active session.")
     except SafetyScanError as e:

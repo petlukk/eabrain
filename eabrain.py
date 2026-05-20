@@ -172,7 +172,8 @@ def main():
     p_ref.add_argument("query")
 
     p_remember = sub.add_parser("remember", help="Save session note")
-    p_remember.add_argument("note")
+    p_remember.add_argument("note", nargs="?",
+                            help="Note text. Pass '-' or omit to read from stdin.")
 
     p_recall = sub.add_parser("recall", help="Show session notes")
     p_recall.add_argument("--last", type=int, help="Show last N entries")
@@ -192,13 +193,15 @@ def main():
     p_inject.add_argument("--budget", type=int, default=2000, help="Token budget for dynamic section")
 
     p_store = sub.add_parser("store", help="Store an observation")
-    p_store.add_argument("content")
+    p_store.add_argument("content", nargs="?",
+                         help="Content text. Pass '-' or omit to read from stdin.")
     p_store.add_argument("--type", required=True,
                          choices=["decision", "bug", "architecture", "pattern", "error", "note"])
     p_store.add_argument("--project", help="Project name (default: cwd)")
 
     p_store_summary = sub.add_parser("store-summary", help="Store session summary and close session")
-    p_store_summary.add_argument("content")
+    p_store_summary.add_argument("content", nargs="?",
+                                 help="Summary text. Pass '-' or omit to read from stdin.")
 
     p_timeline = sub.add_parser("timeline", help="Show session timeline")
     p_timeline.add_argument("--project", help="Filter by project")

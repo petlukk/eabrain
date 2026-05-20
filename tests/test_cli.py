@@ -115,6 +115,65 @@ def test_store_creates_observation(tmp_path):
     db.close()
 
 
+def test_store_reads_long_content_from_stdin(tmp_path):
+    """Content past Linux's MAX_ARG_STRLEN (128 KiB) must be storable via stdin.
+
+    Reproduces the bug where `eabrain store "$(cat big.txt)" --type note`
+    failed with `Argument list too long` for any payload over ~128 KiB.
+    """
+    config = {
+        "projects": [],
+        "index_path": str(tmp_path / "index.bin"),
+        "max_source_lines": 50,
+        "max_session_entries": 100,
+        "eabrain_dir": str(tmp_path),
+    }
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(config))
+
+    payload = "x" * 200_000  # past 128 KiB MAX_ARG_STRLEN
+    cmd = ["python3", EABRAIN, "store", "--type", "note", "--project", "test"]
+    env = os.environ.copy()
+    env["EABRAIN_CONFIG"] = str(cfg_path)
+    r = subprocess.run(cmd, input=payload, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+
+    from memory import MemoryDB
+    db = MemoryDB(str(tmp_path / "memory.db"))
+    rows = db.conn.execute(
+        "SELECT content FROM observations WHERE project = ?", ("test",)
+    ).fetchall()
+    db.close()
+    assert len(rows) == 1
+    assert len(rows[0]["content"]) == 200_000
+
+
+def test_store_dash_reads_stdin(tmp_path):
+    """Explicit '-' positional reads from stdin."""
+    config = {
+        "projects": [],
+        "index_path": str(tmp_path / "index.bin"),
+        "eabrain_dir": str(tmp_path),
+    }
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(config))
+
+    cmd = ["python3", EABRAIN, "store", "-", "--type", "note", "--project", "p"]
+    env = os.environ.copy()
+    env["EABRAIN_CONFIG"] = str(cfg_path)
+    r = subprocess.run(cmd, input="piped body", capture_output=True, text=True, env=env)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+
+    from memory import MemoryDB
+    db = MemoryDB(str(tmp_path / "memory.db"))
+    rows = db.conn.execute(
+        "SELECT content FROM observations WHERE project = ?", ("p",)
+    ).fetchall()
+    db.close()
+    assert len(rows) == 1
+    assert rows[0]["content"] == "piped body"
+
+
 def test_timeline_shows_sessions(tmp_path, capsys):
     from memory import MemoryDB
     from commands.memory import cmd_timeline
