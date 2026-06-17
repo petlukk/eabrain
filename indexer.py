@@ -452,8 +452,36 @@ def _get_fuzzy_lib():
         lib.byte_histogram_embed.restype = None
         lib.normalize_vectors.argtypes = [_F32_PTR, ctypes.c_int32, ctypes.c_int32]
         lib.normalize_vectors.restype = None
+        lib.batch_byte_histogram.argtypes = [_U8_PTR, _I32_PTR, ctypes.c_int32, _F32_PTR]
+        lib.batch_byte_histogram.restype = None
         _FUZZY_LIB = lib
     return _FUZZY_LIB
+
+
+def _simd_batch_byte_histogram(blobs) -> np.ndarray:
+    """Compute L2-normalized 256-dim byte histograms for many byte blobs in a
+    single SIMD call. Returns an (N, 256) float32 array, one row per blob.
+
+    This is the batched form of _simd_byte_histogram: by packing every blob
+    into one buffer and crossing the ctypes boundary once, it both restores
+    SIMD to the bulk index loop and avoids the per-call pointer churn that
+    crashes GC on Python 3.14 / numpy 2.4 (see build_index)."""
+    n = len(blobs)
+    out = np.zeros((n, 256), dtype=np.float32)
+    if n == 0:
+        return out
+    offsets = np.zeros(n + 1, dtype=np.int32)
+    acc = 0
+    for i, b in enumerate(blobs):
+        acc += len(b)
+        offsets[i + 1] = acc
+    data = np.frombuffer(b"".join(blobs), dtype=np.uint8)
+    if data.size == 0:
+        return out  # all blobs empty → zero histograms
+    lib = _get_fuzzy_lib()
+    flat = out.reshape(-1)
+    lib.batch_byte_histogram(data, offsets, n, flat)
+    return out
 
 
 def _simd_byte_histogram(text_bytes: bytes) -> np.ndarray:
@@ -695,17 +723,18 @@ def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
     embeddings = []
     file_count = 0
 
-    # NB: _byte_histogram (pure Python) is used here instead of
-    # _simd_byte_histogram. The SIMD path goes through libfuzzy via ctypes,
-    # and on Python 3.14 + numpy 2.4 the per-call ctypes pointer objects
-    # accumulate garbage that crashes GC after ~50 invocations
-    # (Garbage-collecting / numpy._core._internal.data_as / ctypes.cast).
-    # Single-shot use (cmd_search, cmd_remember, cmd_store) is safe; only
-    # the bulk indexer loop hits the threshold. The Python loop is fast
-    # enough at this scale.
+    # Histograms are computed per project with a single batched SIMD call
+    # (_simd_batch_byte_histogram). Packing every file of a project into one
+    # buffer and crossing the ctypes boundary once restores SIMD to the bulk
+    # index loop while sidestepping the per-call pointer churn that crashes GC
+    # on Python 3.14 / numpy 2.4 — the reason the old loop fell back to the
+    # pure-Python _byte_histogram.
     for project_dir in project_dirs:
         project_dir = os.path.expanduser(project_dir)
         ea_files = glob.glob(os.path.join(project_dir, "**", "*.ea"), recursive=True)
+
+        proj_blobs = []
+        proj_files = []  # (ea_path, file_kernels) aligned with proj_blobs
         for ea_path in sorted(ea_files):
             try:
                 with open(ea_path, "rb") as f:
@@ -715,8 +744,14 @@ def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
 
             file_count += 1
             file_kernels = _scan_ea_file(src_bytes, scan_lib)
-            emb = _byte_histogram(src_bytes)
+            proj_blobs.append(src_bytes)
+            proj_files.append((ea_path, file_kernels))
 
+        if not proj_blobs:
+            continue
+
+        proj_embs = _simd_batch_byte_histogram(proj_blobs)
+        for (ea_path, file_kernels), emb in zip(proj_files, proj_embs):
             for k in file_kernels:
                 k["path"] = ea_path
                 kernels.append(k)

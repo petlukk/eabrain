@@ -202,7 +202,7 @@ class MemoryDB:
         (e.g., kernel not built on this machine).
         """
         try:
-            from text_search import find_offsets
+            from text_search import batch_contains
         except (ImportError, OSError):
             return self.query(text, project=project, limit=limit)
 
@@ -215,13 +215,17 @@ class MemoryDB:
         sql += " ORDER BY created_at DESC"
         rows = self.conn.execute(sql, params).fetchall()
 
+        # One batched SIMD pass over every observation, instead of a per-row
+        # kernel call in a Python loop.
+        blobs = [row["content"].encode("utf-8") for row in rows]
+        flags = batch_contains(blobs, needle)
+
         matches = []
-        for row in rows:
-            content_bytes = row["content"].encode("utf-8")
-            if find_offsets(content_bytes, needle):
+        for row, hit in zip(rows, flags):
+            if hit:
                 matches.append(dict(row))
-            if len(matches) >= limit:
-                break
+                if len(matches) >= limit:
+                    break
         return matches
 
 
