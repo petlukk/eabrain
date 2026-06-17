@@ -343,7 +343,37 @@ def _bind_scan_lib(lib):
     lib.detect_simd_types.restype = None
     lib.detect_intrinsics.argtypes = [_U8_PTR, ctypes.c_int32, _I32_PTR]
     lib.detect_intrinsics.restype = None
+    lib.find_brace_offsets.argtypes = [
+        _U8_PTR, ctypes.c_int32, _I32_PTR, _I32_PTR, ctypes.c_int32, _I32_PTR,
+    ]
+    lib.find_brace_offsets.restype = None
     lib._eabrain_bound = True
+
+
+def _match_close_brace(brace_pos, brace_kind, off: int, n: int):
+    """Given the ascending list of brace positions/kinds (+1 open, -1 close)
+    for a file, return the position of the brace that closes the first '{' at
+    or after `off`, mirroring the old byte-walk in _scan_ea_file:
+
+      - None  -> no '{' at/after off (caller treats line_count as 1)
+      - n     -> braces never rebalanced before EOF (walk ran off the end)
+      - pos   -> the matching close-brace byte offset
+    """
+    # First brace at/after off; skip any stray close-braces to land on the
+    # first '{', exactly as src_bytes.find(b"{", off) would.
+    bi = int(np.searchsorted(brace_pos, off, side="left"))
+    while bi < brace_pos.shape[0] and brace_kind[bi] != 1:
+        bi += 1
+    if bi >= brace_pos.shape[0]:
+        return None
+    depth = 0
+    j = bi
+    while j < brace_pos.shape[0]:
+        depth += int(brace_kind[j])
+        if depth == 0:
+            return int(brace_pos[j])
+        j += 1
+    return n
 
 
 def _scan_ea_file(src_bytes: bytes, scan_lib) -> list:
@@ -383,6 +413,20 @@ def _scan_ea_file(src_bytes: bytes, scan_lib) -> list:
 
     kernels = []
     num_exports = int(count[0])
+
+    # One SIMD pass for the file's brace skeleton; the per-export depth walk
+    # below runs over this short list instead of every source byte.
+    if num_exports > 0 and n > 0:
+        brace_pos = np.zeros(n, dtype=np.int32)
+        brace_kind = np.zeros(n, dtype=np.int32)
+        brace_count = np.zeros(1, dtype=np.int32)
+        scan_lib.find_brace_offsets(src, n, brace_pos, brace_kind, n, brace_count)
+        bc = int(brace_count[0])
+        brace_pos = brace_pos[:bc]
+        brace_kind = brace_kind[:bc]
+    else:
+        brace_pos = np.zeros(0, dtype=np.int32)
+        brace_kind = np.zeros(0, dtype=np.int32)
     for i in range(num_exports):
         off = int(offsets[i])
         # Skip "export func " (12 bytes)
@@ -395,23 +439,13 @@ def _scan_ea_file(src_bytes: bytes, scan_lib) -> list:
         # Compute line number (1-based)
         line_start = src_bytes[:off].count(b"\n") + 1
 
-        # Count lines until closing brace at column 0
-        body_start = src_bytes.find(b"{", off)
-        if body_start < 0:
+        # Count lines until the brace that closes the function body, matched
+        # over the precomputed brace skeleton.
+        close_pos = _match_close_brace(brace_pos, brace_kind, off, n)
+        if close_pos is None:
             line_count = 1
         else:
-            depth = 0
-            pos = body_start
-            while pos < n:
-                ch = src_bytes[pos:pos+1]
-                if ch == b"{":
-                    depth += 1
-                elif ch == b"}":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                pos += 1
-            line_count = src_bytes[off:pos+1].count(b"\n") + 1
+            line_count = src_bytes[off:close_pos + 1].count(b"\n") + 1
 
         kernels.append({
             "func_name": func_name,

@@ -357,3 +357,83 @@ export func detect_intrinsics(
     }
     out_mask[0] = has_reduce_add + has_fma * 2 + has_splat * 4 + has_load * 8 + has_store * 16 + has_select * 32 + has_sqrt * 64
 }
+
+// ========== find_brace_offsets ==========
+// Emit the position of every '{' and '}' byte, with a kind: +1 for open,
+// -1 for close. Positions come out in ascending order (window-ascending,
+// then lane-ascending within each window), so the caller can searchsorted.
+//
+// Replaces the per-export byte-by-byte Python brace walk in _scan_ea_file:
+// one SIMD pass over the file yields the brace skeleton, and depth matching
+// runs over that short list instead of every source byte. Same structural
+// idiom as Olorin's jsonl_struct / csv_scan position scanners.
+
+export func find_brace_offsets(
+    src: *u8,
+    src_len: i32,
+    out_offsets: *mut i32,
+    out_kinds: *mut i32,
+    out_max: i32,
+    out_count: *mut i32
+) {
+    let open_splat: u8x16 = splat(123)   // '{'
+    let close_splat: u8x16 = splat(125)  // '}'
+    let ones: u8x16 = splat(1)
+    let zeros: u8x16 = splat(0)
+    let mut count: i32 = 0
+    let mut i: i32 = 0
+
+    while i + 16 <= src_len {
+        let chunk: u8x16 = load(src, i)
+        let co: u8x16 = select(chunk .== open_splat, ones, zeros)
+        let cc: u8x16 = select(chunk .== close_splat, ones, zeros)
+        let hits: i32 = to_i32(reduce_add(co)) + to_i32(reduce_add(cc))
+        if hits > 0 {
+            let mut j: i32 = 0
+            while j < 16 {
+                let pos: i32 = i + j
+                let b: i32 = to_i32(src[pos])
+                if b == 123 {
+                    if count < out_max {
+                        out_offsets[count] = pos
+                        out_kinds[count] = 1
+                        count = count + 1
+                    }
+                } else {
+                    if b == 125 {
+                        if count < out_max {
+                            out_offsets[count] = pos
+                            out_kinds[count] = 0 - 1
+                            count = count + 1
+                        }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 16
+    }
+
+    // Scalar tail
+    while i < src_len {
+        let b: i32 = to_i32(src[i])
+        if b == 123 {
+            if count < out_max {
+                out_offsets[count] = i
+                out_kinds[count] = 1
+                count = count + 1
+            }
+        } else {
+            if b == 125 {
+                if count < out_max {
+                    out_offsets[count] = i
+                    out_kinds[count] = 0 - 1
+                    count = count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    out_count[0] = count
+}
