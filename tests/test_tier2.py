@@ -119,3 +119,33 @@ def test_top_k_desc_handles_ties():
     order = _top_k_desc(scores, 2)
     assert len(order) == 2
     assert np.all(scores[order] == 0.5)
+
+
+# ---------- index-build directory walk (_find_ea_files) ----------
+
+def test_find_ea_files_prunes_and_recurses(tmp_path):
+    from indexer import _find_ea_files
+
+    # Source kernels we expect to find, at varying depths.
+    (tmp_path / "a.ea").write_bytes(b"export func a() {}")
+    (tmp_path / "kernels").mkdir()
+    (tmp_path / "kernels" / "b.ea").write_bytes(b"export func b() {}")
+    (tmp_path / "nested" / "deep").mkdir(parents=True)
+    (tmp_path / "nested" / "deep" / "c.ea").write_bytes(b"export func c() {}")
+
+    # .ea files buried in pruned dirs must NOT be found.
+    for skip in ("target", ".git", "node_modules", "venv", "__pycache__"):
+        (tmp_path / skip).mkdir()
+        (tmp_path / skip / "ignore.ea").write_bytes(b"export func z() {}")
+
+    found = {os.path.relpath(p, tmp_path) for p in _find_ea_files(str(tmp_path))}
+    assert found == {
+        "a.ea",
+        os.path.join("kernels", "b.ea"),
+        os.path.join("nested", "deep", "c.ea"),
+    }
+
+
+def test_find_ea_files_missing_root():
+    from indexer import _find_ea_files
+    assert _find_ea_files("/no/such/dir/xyz") == []
