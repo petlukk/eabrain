@@ -9,6 +9,7 @@ Index layout:
   5. Embeddings        (kernel_count * 256 * 4 bytes, 64-byte aligned)
 """
 
+import concurrent.futures
 import struct
 import time
 import numpy as np
@@ -732,6 +733,66 @@ def scrape_eacompute_intrinsics(project_dirs: list) -> list:
     return results
 
 
+def _read_ea_file(path: str):
+    """Read one .ea file for the parallel index build. Returns (path, bytes),
+    or (path, None) if it can't be read so the caller can skip it."""
+    try:
+        with open(path, "rb") as f:
+            return path, f.read()
+    except OSError:
+        return path, None
+
+
+# Directories that never hold .ea kernel sources but are enormous to traverse
+# over the WSL2 /mnt/c mount (every stat is a round-trip). Pruning them is what
+# makes the index-build walk fast — recursive glob used to descend into all of
+# them. Verified against the live index: no indexed kernel lives under any.
+_SKIP_DIRS = frozenset({
+    ".git", "node_modules", "target", "venv", ".venv", "__pycache__",
+    ".pytest_cache", ".mypy_cache", "build", "dist", "__eacache__",
+    ".cargo", ".idea", ".vscode",
+})
+
+
+def _walk_ea(root: str) -> list:
+    """Recursively collect *.ea paths under root, pruning _SKIP_DIRS."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fn in filenames:
+            if fn.endswith(".ea"):
+                out.append(os.path.join(dirpath, fn))
+    return out
+
+
+def _find_ea_files(root: str) -> list:
+    """Find every .ea file under root, pruning build/cache/vcs/dependency dirs
+    and fanning the subtree walks out across threads so the per-stat latency of
+    the /mnt/c mount overlaps. Replaces a recursive glob that descended into
+    .git/target/node_modules/venv — the real index-build bottleneck (~180s)."""
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    out = []
+    subdirs = []
+    for e in entries:
+        try:
+            if e.is_dir(follow_symlinks=False):
+                if e.name not in _SKIP_DIRS:
+                    subdirs.append(e.path)
+            elif e.name.endswith(".ea"):
+                out.append(e.path)
+        except OSError:
+            continue
+    if subdirs:
+        workers = min(16, len(subdirs))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            for sub_files in ex.map(_walk_ea, subdirs):
+                out.extend(sub_files)
+    return out
+
+
 def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
     """Build and write the binary index.
 
@@ -757,23 +818,40 @@ def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
     embeddings = []
     file_count = 0
 
+    # Discover every .ea file up front, grouped per project (sorted for a
+    # deterministic index), then read them all in parallel.
+    proj_file_lists = []  # [(project_dir, [sorted ea_path, ...]), ...]
+    for project_dir in project_dirs:
+        project_dir = os.path.expanduser(project_dir)
+        ea_files = sorted(_find_ea_files(project_dir))
+        proj_file_lists.append((project_dir, ea_files))
+
+    # Reading .ea files is the index-build bottleneck — pure I/O latency,
+    # especially over the WSL2 /mnt/c mount. The reads are independent and the
+    # GIL is released during the read syscall, so a thread pool overlaps that
+    # latency. Each unique path is read once. Scanning and histogramming stay
+    # sequential below: that part is CPU-cheap and keeps the index byte-for-byte
+    # identical regardless of read order.
+    unique_paths = list(dict.fromkeys(p for _, files in proj_file_lists for p in files))
+    contents = {}
+    if unique_paths:
+        max_workers = min(32, (os.cpu_count() or 4) * 4, len(unique_paths))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for path, data in ex.map(_read_ea_file, unique_paths):
+                contents[path] = data
+
     # Histograms are computed per project with a single batched SIMD call
     # (_simd_batch_byte_histogram). Packing every file of a project into one
     # buffer and crossing the ctypes boundary once restores SIMD to the bulk
     # index loop while sidestepping the per-call pointer churn that crashes GC
     # on Python 3.14 / numpy 2.4 — the reason the old loop fell back to the
     # pure-Python _byte_histogram.
-    for project_dir in project_dirs:
-        project_dir = os.path.expanduser(project_dir)
-        ea_files = glob.glob(os.path.join(project_dir, "**", "*.ea"), recursive=True)
-
+    for project_dir, ea_files in proj_file_lists:
         proj_blobs = []
         proj_files = []  # (ea_path, file_kernels) aligned with proj_blobs
-        for ea_path in sorted(ea_files):
-            try:
-                with open(ea_path, "rb") as f:
-                    src_bytes = f.read()
-            except OSError:
+        for ea_path in ea_files:
+            src_bytes = contents.get(ea_path)
+            if src_bytes is None:
                 continue
 
             file_count += 1
