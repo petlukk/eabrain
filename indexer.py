@@ -343,7 +343,37 @@ def _bind_scan_lib(lib):
     lib.detect_simd_types.restype = None
     lib.detect_intrinsics.argtypes = [_U8_PTR, ctypes.c_int32, _I32_PTR]
     lib.detect_intrinsics.restype = None
+    lib.find_brace_offsets.argtypes = [
+        _U8_PTR, ctypes.c_int32, _I32_PTR, _I32_PTR, ctypes.c_int32, _I32_PTR,
+    ]
+    lib.find_brace_offsets.restype = None
     lib._eabrain_bound = True
+
+
+def _match_close_brace(brace_pos, brace_kind, off: int, n: int):
+    """Given the ascending list of brace positions/kinds (+1 open, -1 close)
+    for a file, return the position of the brace that closes the first '{' at
+    or after `off`, mirroring the old byte-walk in _scan_ea_file:
+
+      - None  -> no '{' at/after off (caller treats line_count as 1)
+      - n     -> braces never rebalanced before EOF (walk ran off the end)
+      - pos   -> the matching close-brace byte offset
+    """
+    # First brace at/after off; skip any stray close-braces to land on the
+    # first '{', exactly as src_bytes.find(b"{", off) would.
+    bi = int(np.searchsorted(brace_pos, off, side="left"))
+    while bi < brace_pos.shape[0] and brace_kind[bi] != 1:
+        bi += 1
+    if bi >= brace_pos.shape[0]:
+        return None
+    depth = 0
+    j = bi
+    while j < brace_pos.shape[0]:
+        depth += int(brace_kind[j])
+        if depth == 0:
+            return int(brace_pos[j])
+        j += 1
+    return n
 
 
 def _scan_ea_file(src_bytes: bytes, scan_lib) -> list:
@@ -383,6 +413,20 @@ def _scan_ea_file(src_bytes: bytes, scan_lib) -> list:
 
     kernels = []
     num_exports = int(count[0])
+
+    # One SIMD pass for the file's brace skeleton; the per-export depth walk
+    # below runs over this short list instead of every source byte.
+    if num_exports > 0 and n > 0:
+        brace_pos = np.zeros(n, dtype=np.int32)
+        brace_kind = np.zeros(n, dtype=np.int32)
+        brace_count = np.zeros(1, dtype=np.int32)
+        scan_lib.find_brace_offsets(src, n, brace_pos, brace_kind, n, brace_count)
+        bc = int(brace_count[0])
+        brace_pos = brace_pos[:bc]
+        brace_kind = brace_kind[:bc]
+    else:
+        brace_pos = np.zeros(0, dtype=np.int32)
+        brace_kind = np.zeros(0, dtype=np.int32)
     for i in range(num_exports):
         off = int(offsets[i])
         # Skip "export func " (12 bytes)
@@ -395,23 +439,13 @@ def _scan_ea_file(src_bytes: bytes, scan_lib) -> list:
         # Compute line number (1-based)
         line_start = src_bytes[:off].count(b"\n") + 1
 
-        # Count lines until closing brace at column 0
-        body_start = src_bytes.find(b"{", off)
-        if body_start < 0:
+        # Count lines until the brace that closes the function body, matched
+        # over the precomputed brace skeleton.
+        close_pos = _match_close_brace(brace_pos, brace_kind, off, n)
+        if close_pos is None:
             line_count = 1
         else:
-            depth = 0
-            pos = body_start
-            while pos < n:
-                ch = src_bytes[pos:pos+1]
-                if ch == b"{":
-                    depth += 1
-                elif ch == b"}":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                pos += 1
-            line_count = src_bytes[off:pos+1].count(b"\n") + 1
+            line_count = src_bytes[off:close_pos + 1].count(b"\n") + 1
 
         kernels.append({
             "func_name": func_name,
@@ -452,8 +486,36 @@ def _get_fuzzy_lib():
         lib.byte_histogram_embed.restype = None
         lib.normalize_vectors.argtypes = [_F32_PTR, ctypes.c_int32, ctypes.c_int32]
         lib.normalize_vectors.restype = None
+        lib.batch_byte_histogram.argtypes = [_U8_PTR, _I32_PTR, ctypes.c_int32, _F32_PTR]
+        lib.batch_byte_histogram.restype = None
         _FUZZY_LIB = lib
     return _FUZZY_LIB
+
+
+def _simd_batch_byte_histogram(blobs) -> np.ndarray:
+    """Compute L2-normalized 256-dim byte histograms for many byte blobs in a
+    single SIMD call. Returns an (N, 256) float32 array, one row per blob.
+
+    This is the batched form of _simd_byte_histogram: by packing every blob
+    into one buffer and crossing the ctypes boundary once, it both restores
+    SIMD to the bulk index loop and avoids the per-call pointer churn that
+    crashes GC on Python 3.14 / numpy 2.4 (see build_index)."""
+    n = len(blobs)
+    out = np.zeros((n, 256), dtype=np.float32)
+    if n == 0:
+        return out
+    offsets = np.zeros(n + 1, dtype=np.int32)
+    acc = 0
+    for i, b in enumerate(blobs):
+        acc += len(b)
+        offsets[i + 1] = acc
+    data = np.frombuffer(b"".join(blobs), dtype=np.uint8)
+    if data.size == 0:
+        return out  # all blobs empty → zero histograms
+    lib = _get_fuzzy_lib()
+    flat = out.reshape(-1)
+    lib.batch_byte_histogram(data, offsets, n, flat)
+    return out
 
 
 def _simd_byte_histogram(text_bytes: bytes) -> np.ndarray:
@@ -695,17 +757,18 @@ def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
     embeddings = []
     file_count = 0
 
-    # NB: _byte_histogram (pure Python) is used here instead of
-    # _simd_byte_histogram. The SIMD path goes through libfuzzy via ctypes,
-    # and on Python 3.14 + numpy 2.4 the per-call ctypes pointer objects
-    # accumulate garbage that crashes GC after ~50 invocations
-    # (Garbage-collecting / numpy._core._internal.data_as / ctypes.cast).
-    # Single-shot use (cmd_search, cmd_remember, cmd_store) is safe; only
-    # the bulk indexer loop hits the threshold. The Python loop is fast
-    # enough at this scale.
+    # Histograms are computed per project with a single batched SIMD call
+    # (_simd_batch_byte_histogram). Packing every file of a project into one
+    # buffer and crossing the ctypes boundary once restores SIMD to the bulk
+    # index loop while sidestepping the per-call pointer churn that crashes GC
+    # on Python 3.14 / numpy 2.4 — the reason the old loop fell back to the
+    # pure-Python _byte_histogram.
     for project_dir in project_dirs:
         project_dir = os.path.expanduser(project_dir)
         ea_files = glob.glob(os.path.join(project_dir, "**", "*.ea"), recursive=True)
+
+        proj_blobs = []
+        proj_files = []  # (ea_path, file_kernels) aligned with proj_blobs
         for ea_path in sorted(ea_files):
             try:
                 with open(ea_path, "rb") as f:
@@ -715,8 +778,14 @@ def build_index(project_dirs: list, ref_path: str, index_path: str) -> dict:
 
             file_count += 1
             file_kernels = _scan_ea_file(src_bytes, scan_lib)
-            emb = _byte_histogram(src_bytes)
+            proj_blobs.append(src_bytes)
+            proj_files.append((ea_path, file_kernels))
 
+        if not proj_blobs:
+            continue
+
+        proj_embs = _simd_batch_byte_histogram(proj_blobs)
+        for (ea_path, file_kernels), emb in zip(proj_files, proj_embs):
             for k in file_kernels:
                 k["path"] = ea_path
                 kernels.append(k)

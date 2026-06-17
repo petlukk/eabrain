@@ -8,6 +8,18 @@ import sys
 import numpy as np
 
 
+def _top_k_desc(scores: np.ndarray, k: int) -> np.ndarray:
+    """Indices of the k highest scores, descending. Uses argpartition (O(n))
+    to select the top k, then sorts only those k — cheaper than a full
+    argsort when k << n. Ties order arbitrarily, same as the previous
+    argsort-and-reverse."""
+    n = scores.shape[0]
+    if n <= k:
+        return np.argsort(scores)[::-1]
+    top = np.argpartition(scores, n - k)[n - k:]
+    return top[np.argsort(scores[top])[::-1]]
+
+
 def cmd_index(args, cfg):
     from eabrain import _ref_path
     from indexer import build_index
@@ -55,7 +67,7 @@ def cmd_search(args, cfg):
                     ctypes.c_int32(n),
                     scores.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
                 )
-                order = np.argsort(scores)[::-1][:10]
+                order = _top_k_desc(scores, 10)
                 results = [kernels[i] for i in order if scores[i] > 0]
         else:
             ql = query.lower()
@@ -102,7 +114,7 @@ def cmd_search(args, cfg):
                     ctypes.c_int32(len(obs_ids)),
                     obs_scores.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
                 )
-                order = np.argsort(obs_scores)[::-1][:5]
+                order = _top_k_desc(obs_scores, 5)
                 for idx_i in order:
                     if obs_scores[idx_i] > 0:
                         obs_row = db.conn.execute(

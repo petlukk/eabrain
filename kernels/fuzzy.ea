@@ -18,11 +18,100 @@ export func byte_histogram_embed(
         store(out, i, zero)
     }
 
-    // Count byte frequencies — scalar scatter
+    // Count byte frequencies — scalar scatter.
+    // Mask to 0..255: to_i32 sign-extends a u8, so a high byte (e.g. 0xff)
+    // would otherwise become a negative index and write out of bounds.
     for i in 0..text_len {
-        let idx: i32 = to_i32(text[i])
+        let idx: i32 = to_i32(text[i]) & 255
         let cur: f32 = to_f32(to_i32(out[idx]))
         out[idx] = cur + 1.0
+    }
+}
+
+// ========== batch_byte_histogram ==========
+// Compute + L2-normalize 256-dim byte histograms for n_records records in a
+// single call. Records are packed contiguously in `data`; record r spans
+// data[offsets[r] .. offsets[r+1]). `offsets` has length n_records+1.
+// `out` is n_records*256 f32, written (and zeroed) per record block.
+//
+// One FFI crossing for the whole index build instead of one per file — this
+// is the batched form of byte_histogram_embed + normalize_vectors, so the
+// numerics are identical to calling those two per record.
+
+#[cfg(x86_64)]
+export func batch_byte_histogram(
+    data: *u8,
+    offsets: *i32,
+    n_records: i32,
+    out: *mut f32
+) {
+    let zero: f32x8 = splat(0.0)
+    for r in 0..n_records {
+        let start: i32 = offsets[r]
+        let end: i32 = offsets[r + 1]
+        let base: i32 = r * 256
+        // Zero this record's 256-element block.
+        for i in 0..256 step 8 {
+            store(out, base + i, zero)
+        }
+        // Count byte frequencies — scalar scatter (no SIMD scatter in Eä).
+        for i in start..end {
+            let idx: i32 = to_i32(data[i]) & 255
+            let cur: f32 = to_f32(to_i32(out[base + idx]))
+            out[base + idx] = cur + 1.0
+        }
+        // L2-normalize the block (256 is a multiple of 8, no scalar tail).
+        let mut acc: f32x8 = splat(0.0)
+        for i in 0..256 step 8 {
+            let d: f32x8 = load(out, base + i)
+            acc = fma(d, d, acc)
+        }
+        let norm_sq: f32 = reduce_add(acc)
+        if norm_sq > 0.0 {
+            let inv_norm: f32 = 1.0 / sqrt(norm_sq)
+            let v_inv: f32x8 = splat(inv_norm)
+            for i in 0..256 step 8 {
+                let d: f32x8 = load(out, base + i)
+                store(out, base + i, d .* v_inv)
+            }
+        }
+    }
+}
+
+#[cfg(aarch64)]
+export func batch_byte_histogram(
+    data: *u8,
+    offsets: *i32,
+    n_records: i32,
+    out: *mut f32
+) {
+    let zero: f32x4 = splat(0.0)
+    for r in 0..n_records {
+        let start: i32 = offsets[r]
+        let end: i32 = offsets[r + 1]
+        let base: i32 = r * 256
+        for i in 0..256 step 4 {
+            store(out, base + i, zero)
+        }
+        for i in start..end {
+            let idx: i32 = to_i32(data[i]) & 255
+            let cur: f32 = to_f32(to_i32(out[base + idx]))
+            out[base + idx] = cur + 1.0
+        }
+        let mut acc: f32x4 = splat(0.0)
+        for i in 0..256 step 4 {
+            let d: f32x4 = load(out, base + i)
+            acc = fma(d, d, acc)
+        }
+        let norm_sq: f32 = reduce_add(acc)
+        if norm_sq > 0.0 {
+            let inv_norm: f32 = 1.0 / sqrt(norm_sq)
+            let v_inv: f32x4 = splat(inv_norm)
+            for i in 0..256 step 4 {
+                let d: f32x4 = load(out, base + i)
+                store(out, base + i, d .* v_inv)
+            }
+        }
     }
 }
 

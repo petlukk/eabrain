@@ -17,6 +17,21 @@ def test_simd_histogram_matches_python():
     simd_result = simd_hist(text)
     np.testing.assert_array_almost_equal(py_result, simd_result, decimal=5)
 
+def test_simd_histogram_high_bytes():
+    """High bytes (>= 0x80) must be counted at their unsigned index, not a
+    sign-extended negative one. Regression: 0xff used to write out of bounds
+    (heap corruption) because to_i32 sign-extends the u8."""
+    if not os.path.exists(LIB_PATH):
+        import pytest
+        pytest.skip("libfuzzy.so not built")
+
+    from indexer import _byte_histogram as python_hist
+    from indexer import _simd_byte_histogram as simd_hist
+
+    text = bytes([0x00, 0x7f, 0x80, 0xfe, 0xff, 0xff, 0xc3, 0xa4])  # incl UTF-8 high bytes
+    np.testing.assert_array_almost_equal(simd_hist(text), python_hist(text), decimal=5)
+
+
 def test_simd_histogram_empty():
     if not os.path.exists(LIB_PATH):
         import pytest
